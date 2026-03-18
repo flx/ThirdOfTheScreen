@@ -1,0 +1,24 @@
+name: ThirdOfTheScreen
+options:
+  minimumXcodeGenVersion: 2.38.0
+settings:
+  base:
+    MARKETING_VERSION: 1.0
+    CURRENT_PROJECT_VERSION: 1
+    SWIFT_VERSION: 5.0
+    MACOSX_DEPLOYMENT_TARGET: 14.0
+    GENERATE_INFOPLIST_FILE: YES
+    INFOPLIST_KEY_CFBundleDisplayName: Third Of The Screen
+    INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity
+    INFOPLIST_KEY_LSUIElement: YES
+targets:
+  ThirdOfTheScreen:
+    type: application
+    platform: macOS
+    sources:
+      - path: ThirdOfTheScreen
+    settings:
+      base:
+        PRODUCT_NAME: ThirdOfTheScreen
+        PRODUCT_BUNDLE_IDENTIFIER: com.felix.thirdofthescreen
+        CODE_SIGN_STYLE: Automatic
