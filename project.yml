@@ -8,6 +8,7 @@ settings:
     SWIFT_VERSION: 5.0
     MACOSX_DEPLOYMENT_TARGET: 14.0
     GENERATE_INFOPLIST_FILE: YES
+    ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     INFOPLIST_KEY_CFBundleDisplayName: Third Of The Screen
     INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity
     INFOPLIST_KEY_LSUIElement: YES

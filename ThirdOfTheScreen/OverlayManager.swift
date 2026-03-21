@@ -5,13 +5,70 @@ import SwiftUI
 final class OverlayManager: ObservableObject {
     static let shared = OverlayManager()
 
-    @Published private(set) var isOverlayVisible = false
+    enum EmphasisStrength: String, CaseIterable, Identifiable {
+        case subtle
+        case balanced
+        case strong
+        case heavy
 
-    private var overlayPanels: [OverlayPanel] = []
+        var id: String { rawValue }
+
+        var label: String {
+            switch self {
+            case .subtle:
+                "Subtle"
+            case .balanced:
+                "Balanced"
+            case .strong:
+                "Strong"
+            case .heavy:
+                "Heavy"
+            }
+        }
+
+        var opacity: Double {
+            switch self {
+            case .subtle:
+                0.24
+            case .balanced:
+                0.36
+            case .strong:
+                0.50
+            case .heavy:
+                0.64
+            }
+        }
+    }
+
+    @Published private(set) var isGridOverlayEnabled = false
+    @Published private(set) var isActiveWindowEmphasisEnabled = false
+    @Published private(set) var emphasisStatusMessage: String?
+    @Published private(set) var emphasisStrength: EmphasisStrength = .balanced
+
+    private var overlayPanels: [CGDirectDisplayID: OverlayPanelEntry] = [:]
     private var observers: [NSObjectProtocol] = []
     private var workspaceObservers: [NSObjectProtocol] = []
+    private let activeWindowTracker = ActiveWindowTracker()
+    private var highlightedWindowFrames: [CGRect] = []
+    private var hasRestoredState = false
+
+    private enum DefaultsKey {
+        static let emphasizeActiveWindowEnabled = "emphasizeActiveWindowEnabled"
+        static let emphasisStrength = "emphasisStrength"
+    }
 
     private init() {
+        activeWindowTracker.excludedWindowNumbersProvider = { [weak self] in
+            self?.excludedWindowNumbers ?? []
+        }
+
+        activeWindowTracker.onUpdate = { [weak self] highlightedWindowFrames, statusMessage in
+            guard let self else { return }
+            self.highlightedWindowFrames = highlightedWindowFrames
+            self.emphasisStatusMessage = statusMessage
+            self.refreshOverlay()
+        }
+
         let notificationCenter = NotificationCenter.default
         observers.append(
             notificationCenter.addObserver(
@@ -33,6 +90,7 @@ final class OverlayManager: ObservableObject {
                 queue: .main
             ) { [weak self] _ in
                 Task { @MainActor [weak self] in
+                    self?.activeWindowTracker.refresh()
                     self?.refreshOverlay()
                 }
             }
@@ -47,49 +105,140 @@ final class OverlayManager: ObservableObject {
         workspaceObservers.forEach(workspaceCenter.removeObserver)
     }
 
-    func toggleOverlay() {
-        if isOverlayVisible {
-            hideOverlay()
-        } else {
-            showOverlay()
+    var hasAnyOverlay: Bool {
+        isGridOverlayEnabled || isActiveWindowEmphasisEnabled
+    }
+
+    private var excludedWindowNumbers: Set<Int> {
+        Set(overlayPanels.values.map { $0.panel.windowNumber })
+    }
+
+    func restoreState() {
+        guard !hasRestoredState else { return }
+        hasRestoredState = true
+
+        if let storedStrength = UserDefaults.standard.string(forKey: DefaultsKey.emphasisStrength),
+           let emphasisStrength = EmphasisStrength(rawValue: storedStrength) {
+            self.emphasisStrength = emphasisStrength
+        }
+
+        setGridOverlayEnabled(true)
+
+        if UserDefaults.standard.bool(forKey: DefaultsKey.emphasizeActiveWindowEnabled) {
+            setActiveWindowEmphasisEnabled(true, promptForAccess: false)
         }
     }
 
-    func showOverlay() {
-        isOverlayVisible = true
-        rebuildOverlayPanels()
+    func setGridOverlayEnabled(_ enabled: Bool) {
+        guard isGridOverlayEnabled != enabled else { return }
+        isGridOverlayEnabled = enabled
+        refreshOverlay()
     }
 
-    func hideOverlay() {
-        isOverlayVisible = false
-        closeOverlayPanels()
+    func setActiveWindowEmphasisEnabled(_ enabled: Bool, promptForAccess: Bool = true) {
+        if enabled {
+            let didStart = activeWindowTracker.start(promptForAccess: promptForAccess)
+            isActiveWindowEmphasisEnabled = didStart
+            emphasisStatusMessage = activeWindowTracker.statusMessage
+            if !didStart {
+                highlightedWindowFrames = []
+            }
+            UserDefaults.standard.set(didStart, forKey: DefaultsKey.emphasizeActiveWindowEnabled)
+        } else {
+            activeWindowTracker.stop()
+            isActiveWindowEmphasisEnabled = false
+            emphasisStatusMessage = nil
+            highlightedWindowFrames = []
+            UserDefaults.standard.set(false, forKey: DefaultsKey.emphasizeActiveWindowEnabled)
+        }
+
+        refreshOverlay()
+    }
+
+    func setEmphasisStrength(_ emphasisStrength: EmphasisStrength) {
+        guard self.emphasisStrength != emphasisStrength else { return }
+        self.emphasisStrength = emphasisStrength
+        UserDefaults.standard.set(emphasisStrength.rawValue, forKey: DefaultsKey.emphasisStrength)
+        refreshOverlay()
     }
 
     func refreshOverlay() {
-        guard isOverlayVisible else { return }
-        rebuildOverlayPanels()
+        guard hasAnyOverlay else {
+            closeOverlayPanels()
+            return
+        }
+
+        synchronizeOverlayPanels()
     }
 
-    private func rebuildOverlayPanels() {
-        closeOverlayPanels()
+    private func synchronizeOverlayPanels() {
+        var currentDisplayIDs = Set<CGDirectDisplayID>()
 
-        overlayPanels = NSScreen.screens.compactMap { screen in
-            guard !screen.visibleFrame.isEmpty else { return nil }
+        for screen in NSScreen.screens {
+            guard !screen.visibleFrame.isEmpty, let displayID = screen.displayID else { continue }
+            currentDisplayIDs.insert(displayID)
 
-            let panel = OverlayPanel(contentRect: screen.visibleFrame)
-            panel.contentView = NSHostingView(rootView: GridOverlayView())
-            panel.orderFrontRegardless()
-            return panel
+            let overlayView = ScreenOverlayView(
+                showGrid: isGridOverlayEnabled,
+                emphasisEnabled: isActiveWindowEmphasisEnabled,
+                emphasisOpacity: emphasisStrength.opacity,
+                activeWindowCutouts: localCutoutRects(for: screen)
+            )
+
+            if let entry = overlayPanels[displayID] {
+                if entry.panel.frame != screen.visibleFrame {
+                    entry.panel.setFrame(screen.visibleFrame, display: true)
+                }
+                entry.hostingView.rootView = overlayView
+                if !entry.panel.isVisible {
+                    entry.panel.orderFrontRegardless()
+                }
+            } else {
+                let panel = OverlayPanel(contentRect: screen.visibleFrame)
+                let hostingView = NSHostingView(rootView: overlayView)
+                panel.contentView = hostingView
+                panel.orderFrontRegardless()
+                overlayPanels[displayID] = OverlayPanelEntry(panel: panel, hostingView: hostingView)
+            }
+        }
+
+        let staleDisplayIDs = Set(overlayPanels.keys).subtracting(currentDisplayIDs)
+        for displayID in staleDisplayIDs {
+            if let entry = overlayPanels.removeValue(forKey: displayID) {
+                entry.panel.orderOut(nil)
+                entry.panel.close()
+            }
         }
     }
 
     private func closeOverlayPanels() {
-        overlayPanels.forEach { panel in
-            panel.orderOut(nil)
-            panel.close()
+        overlayPanels.values.forEach { entry in
+            entry.panel.orderOut(nil)
+            entry.panel.close()
         }
         overlayPanels.removeAll()
     }
+
+    private func localCutoutRects(for screen: NSScreen) -> [CGRect] {
+        guard isActiveWindowEmphasisEnabled else { return [] }
+
+        return highlightedWindowFrames.compactMap { highlightedWindowFrame in
+            let intersection = highlightedWindowFrame.intersection(screen.visibleFrame)
+            guard !intersection.isNull, !intersection.isEmpty else { return nil }
+
+            return CGRect(
+                x: intersection.minX - screen.visibleFrame.minX,
+                y: screen.visibleFrame.maxY - intersection.maxY,
+                width: intersection.width,
+                height: intersection.height
+            )
+        }
+    }
+}
+
+private struct OverlayPanelEntry {
+    let panel: OverlayPanel
+    let hostingView: NSHostingView<ScreenOverlayView>
 }
 
 private final class OverlayPanel: NSPanel {
@@ -113,4 +262,11 @@ private final class OverlayPanel: NSPanel {
 
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
+}
+
+private extension NSScreen {
+    var displayID: CGDirectDisplayID? {
+        (deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)
+            .map { CGDirectDisplayID(truncating: $0) }
+    }
 }

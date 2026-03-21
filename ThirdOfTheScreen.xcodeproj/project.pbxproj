@@ -8,15 +8,21 @@
 
 /* Begin PBXBuildFile section */
 		05B3633F2E5E2CD627CF28F6 /* OverlayManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5ED1F46869D4559A02719D15 /* OverlayManager.swift */; };
-		767B7A591E2A406D48EF7E9A /* GridOverlayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8796D359AAFAB21A88868AD /* GridOverlayView.swift */; };
+		0E738E549A6FA16DBA7EBB8E /* ActiveWindowTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27FB0160A36D9E6BEF3A9655 /* ActiveWindowTracker.swift */; };
+		4507D85DF5556ACB11DA7869 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 43C4E3B533118CE7CC7E3B98 /* Assets.xcassets */; };
+		4B56EDA379D3BA0B8E24DCE5 /* ScreenOverlayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAA0B669513CF9ECCF3593CD /* ScreenOverlayView.swift */; };
 		808DDD8C394B3DE798534EA0 /* ThirdOfTheScreenApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B77DC10A5BC9ED4AC809B248 /* ThirdOfTheScreenApp.swift */; };
+		8AD4184362E5CC3ED0942C43 /* LaunchAtLoginManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1C8D22186D75C416AC06AF7 /* LaunchAtLoginManager.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		27FB0160A36D9E6BEF3A9655 /* ActiveWindowTracker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActiveWindowTracker.swift; sourceTree = "<group>"; };
+		43C4E3B533118CE7CC7E3B98 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		5ED1F46869D4559A02719D15 /* OverlayManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OverlayManager.swift; sourceTree = "<group>"; };
 		B1B4478FF454BDE4B2DB015F /* ThirdOfTheScreen.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ThirdOfTheScreen.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		B77DC10A5BC9ED4AC809B248 /* ThirdOfTheScreenApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThirdOfTheScreenApp.swift; sourceTree = "<group>"; };
-		F8796D359AAFAB21A88868AD /* GridOverlayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GridOverlayView.swift; sourceTree = "<group>"; };
+		DAA0B669513CF9ECCF3593CD /* ScreenOverlayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenOverlayView.swift; sourceTree = "<group>"; };
+		E1C8D22186D75C416AC06AF7 /* LaunchAtLoginManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchAtLoginManager.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -39,8 +45,11 @@
 		B014F6CA684BDE6391D821A5 /* ThirdOfTheScreen */ = {
 			isa = PBXGroup;
 			children = (
-				F8796D359AAFAB21A88868AD /* GridOverlayView.swift */,
+				27FB0160A36D9E6BEF3A9655 /* ActiveWindowTracker.swift */,
+				43C4E3B533118CE7CC7E3B98 /* Assets.xcassets */,
+				E1C8D22186D75C416AC06AF7 /* LaunchAtLoginManager.swift */,
 				5ED1F46869D4559A02719D15 /* OverlayManager.swift */,
+				DAA0B669513CF9ECCF3593CD /* ScreenOverlayView.swift */,
 				B77DC10A5BC9ED4AC809B248 /* ThirdOfTheScreenApp.swift */,
 			);
 			path = ThirdOfTheScreen;
@@ -54,6 +63,7 @@
 			buildConfigurationList = B9F5319B16E3B5D757CBCD5A /* Build configuration list for PBXNativeTarget "ThirdOfTheScreen" */;
 			buildPhases = (
 				37AD9CF85C50420188A21A65 /* Sources */,
+				5F2C9D337D6491751DD0346C /* Resources */,
 			);
 			buildRules = (
 			);
@@ -99,13 +109,26 @@
 		};
 /* End PBXProject section */
 
+/* Begin PBXResourcesBuildPhase section */
+		5F2C9D337D6491751DD0346C /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				4507D85DF5556ACB11DA7869 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		37AD9CF85C50420188A21A65 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				767B7A591E2A406D48EF7E9A /* GridOverlayView.swift in Sources */,
+				0E738E549A6FA16DBA7EBB8E /* ActiveWindowTracker.swift in Sources */,
+				8AD4184362E5CC3ED0942C43 /* LaunchAtLoginManager.swift in Sources */,
 				05B3633F2E5E2CD627CF28F6 /* OverlayManager.swift in Sources */,
+				4B56EDA379D3BA0B8E24DCE5 /* ScreenOverlayView.swift in Sources */,
 				808DDD8C394B3DE798534EA0 /* ThirdOfTheScreenApp.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -117,6 +140,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ANALYZER_NONNULL = YES;
 				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
 				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
@@ -211,6 +235,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ANALYZER_NONNULL = YES;
 				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
 				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
