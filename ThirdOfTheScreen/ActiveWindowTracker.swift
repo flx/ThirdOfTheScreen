@@ -2,6 +2,11 @@ import AppKit
 import ApplicationServices
 import Foundation
 
+struct WindowCutout: Equatable {
+    let frame: CGRect
+    let cornerRadius: CGFloat
+}
+
 @MainActor
 final class ActiveWindowTracker {
     private static let accessibilityAccessMessage =
@@ -17,10 +22,18 @@ final class ActiveWindowTracker {
         kAXWindowRole as String
     ]
 
-    var onUpdate: (([CGRect], String?) -> Void)?
+    private static let standardCornerRadius: CGFloat = {
+        ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26 ? 16 : 10
+    }()
+
+    private static let panelCornerRadius: CGFloat = {
+        ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26 ? 15 : 10
+    }()
+
+    var onUpdate: (([WindowCutout], String?) -> Void)?
     var excludedWindowNumbersProvider: (() -> Set<Int>)?
 
-    private(set) var highlightedWindowFrames: [CGRect] = []
+    private(set) var highlightedWindowCutouts: [WindowCutout] = []
     private(set) var statusMessage: String?
 
     private var workspaceObservers: [NSObjectProtocol] = []
@@ -33,7 +46,7 @@ final class ActiveWindowTracker {
 
     func start(promptForAccess: Bool) -> Bool {
         guard isAccessibilityTrusted(prompt: promptForAccess) else {
-            highlightedWindowFrames = []
+            highlightedWindowCutouts = []
             trackedPrimaryWindowFrame = nil
             statusMessage = Self.accessibilityAccessMessage
             publishUpdate()
@@ -51,7 +64,7 @@ final class ActiveWindowTracker {
         removeWorkspaceObservers()
         stopFallbackTimer()
         tearDownAccessibilityObservation()
-        highlightedWindowFrames = []
+        highlightedWindowCutouts = []
         trackedPrimaryWindowFrame = nil
         statusMessage = nil
         publishUpdate()
@@ -59,7 +72,7 @@ final class ActiveWindowTracker {
 
     func refresh() {
         guard AXIsProcessTrusted() else {
-            highlightedWindowFrames = []
+            highlightedWindowCutouts = []
             trackedPrimaryWindowFrame = nil
             statusMessage = Self.accessibilityAccessMessage
             publishUpdate()
@@ -256,16 +269,16 @@ final class ActiveWindowTracker {
 
     private func refreshTrackedWindowFrames(statusMessageWhenUnavailable: String? = nil) {
         let allWindowSnapshots = windowSnapshots()
-        let focusedTransientFrames = focusedTransientFrames(from: allWindowSnapshots)
-        let menuBarTransientFrames = focusedTransientFrames.isEmpty
-            ? menuBarTransientFrames(from: allWindowSnapshots)
-            : focusedTransientFrames
+        let focusedTransientCutouts = focusedTransientCutouts(from: allWindowSnapshots)
+        let transientCutouts = focusedTransientCutouts.isEmpty
+            ? menuBarTransientCutouts(from: allWindowSnapshots)
+            : focusedTransientCutouts
 
         guard let processID = observedProcessID else {
             trackedPrimaryWindowFrame = nil
             updateState(
-                frames: deduplicatedFrames(menuBarTransientFrames),
-                statusMessage: menuBarTransientFrames.isEmpty ? statusMessageWhenUnavailable : nil
+                cutouts: deduplicatedCutouts(transientCutouts),
+                statusMessage: transientCutouts.isEmpty ? statusMessageWhenUnavailable : nil
             )
             return
         }
@@ -274,36 +287,36 @@ final class ActiveWindowTracker {
         if processID == ownProcessID {
             trackedPrimaryWindowFrame = nil
             updateState(
-                frames: deduplicatedFrames(menuBarTransientFrames),
-                statusMessage: menuBarTransientFrames.isEmpty ? statusMessageWhenUnavailable : nil
+                cutouts: deduplicatedCutouts(transientCutouts),
+                statusMessage: transientCutouts.isEmpty ? statusMessageWhenUnavailable : nil
             )
             return
         }
 
         guard let trackedPrimaryWindowFrame else {
             updateState(
-                frames: deduplicatedFrames(menuBarTransientFrames),
-                statusMessage: menuBarTransientFrames.isEmpty ? "Active window unavailable." : nil
+                cutouts: deduplicatedCutouts(transientCutouts),
+                statusMessage: transientCutouts.isEmpty ? "Active window unavailable." : nil
             )
             return
         }
 
-        let windowSnapshots = allWindowSnapshots.filter { $0.ownerPID == processID }
+        let appSnapshots = allWindowSnapshots.filter { $0.ownerPID == processID }
 
-        let primaryFrame = bestMatchingPrimaryFrame(
-            from: windowSnapshots,
+        let primaryCutout = bestMatchingPrimaryCutout(
+            from: appSnapshots,
             near: trackedPrimaryWindowFrame
-        ) ?? trackedPrimaryWindowFrame
+        ) ?? WindowCutout(frame: trackedPrimaryWindowFrame, cornerRadius: Self.standardCornerRadius)
 
-        self.trackedPrimaryWindowFrame = primaryFrame
+        self.trackedPrimaryWindowFrame = primaryCutout.frame
 
-        let auxiliaryFrames = auxiliaryFrames(
-            from: windowSnapshots,
-            excludingPrimaryFrame: primaryFrame
+        let auxiliaryCutouts = auxiliaryCutouts(
+            from: appSnapshots,
+            excludingPrimaryFrame: primaryCutout.frame
         )
 
         updateState(
-            frames: deduplicatedFrames([primaryFrame] + auxiliaryFrames + menuBarTransientFrames),
+            cutouts: deduplicatedCutouts([primaryCutout] + auxiliaryCutouts + transientCutouts),
             statusMessage: nil
         )
     }
@@ -383,12 +396,16 @@ final class ActiveWindowTracker {
         }
     }
 
-    private func menuBarTransientFrames(from snapshots: [WindowSnapshot]) -> [CGRect] {
-        snapshots
+    private func menuBarTransientCutouts(from snapshots: [WindowSnapshot]) -> [WindowCutout] {
+        let candidates = snapshots
             .filter { $0.layer > 0 }
-            .map(\.bounds)
-            .filter(isMenuBarTransientFrame)
-            .removingContainerFrames()
+            .filter { isMenuBarTransientFrame($0.bounds) }
+
+        let survivingFrames = candidates.map(\.bounds).removingContainerFrames()
+
+        return candidates
+            .filter { snapshot in survivingFrames.contains { $0.nearlyEquals(snapshot.bounds) } }
+            .map { WindowCutout(frame: $0.bounds, cornerRadius: Self.cornerRadius(forLayer: $0.layer)) }
     }
 
     private func isMenuBarTransientFrame(_ frame: CGRect) -> Bool {
@@ -406,7 +423,7 @@ final class ActiveWindowTracker {
             frame.height <= visibleFrame.height * 0.95
     }
 
-    private func focusedTransientFrames(from snapshots: [WindowSnapshot]) -> [CGRect] {
+    private func focusedTransientCutouts(from snapshots: [WindowSnapshot]) -> [WindowCutout] {
         let systemWideElement = AXUIElementCreateSystemWide()
 
         guard let focusedElement: AXUIElement = copyAttributeValue(
@@ -460,11 +477,13 @@ final class ActiveWindowTracker {
             guard let role = candidate.role else { return false }
             return Self.preferredTransientRoles.contains(role)
         }) {
-            return [refinedTransientFrame(for: preferredCandidate.frame, using: snapshots)]
+            let frame = refinedTransientFrame(for: preferredCandidate.frame, using: snapshots)
+            return [WindowCutout(frame: frame, cornerRadius: Self.panelCornerRadius)]
         }
 
         if let bestCandidate = prioritizedCandidates.first {
-            return [refinedTransientFrame(for: bestCandidate.frame, using: snapshots)]
+            let frame = refinedTransientFrame(for: bestCandidate.frame, using: snapshots)
+            return [WindowCutout(frame: frame, cornerRadius: Self.panelCornerRadius)]
         }
 
         return []
@@ -557,27 +576,34 @@ final class ActiveWindowTracker {
         return bestSnapshot
     }
 
-    private func bestMatchingPrimaryFrame(
+    private func bestMatchingPrimaryCutout(
         from snapshots: [WindowSnapshot],
         near referenceFrame: CGRect
-    ) -> CGRect? {
-        snapshots
-            .filter { $0.layer == 0 }
-            .max { lhs, rhs in
+    ) -> WindowCutout? {
+        guard let best = snapshots
+            .filter({ $0.layer == 0 })
+            .max(by: { lhs, rhs in
                 matchScore(for: lhs.bounds, referenceFrame: referenceFrame)
                     < matchScore(for: rhs.bounds, referenceFrame: referenceFrame)
-            }?
-            .bounds
+            }) else {
+            return nil
+        }
+
+        return WindowCutout(frame: best.bounds, cornerRadius: Self.cornerRadius(forLayer: best.layer))
     }
 
-    private func auxiliaryFrames(
+    private func auxiliaryCutouts(
         from snapshots: [WindowSnapshot],
         excludingPrimaryFrame primaryFrame: CGRect
-    ) -> [CGRect] {
+    ) -> [WindowCutout] {
         snapshots
             .filter { $0.layer > 0 }
-            .map(\.bounds)
-            .filter { !$0.nearlyEquals(primaryFrame) }
+            .filter { !$0.bounds.nearlyEquals(primaryFrame) }
+            .map { WindowCutout(frame: $0.bounds, cornerRadius: Self.cornerRadius(forLayer: $0.layer)) }
+    }
+
+    private static func cornerRadius(forLayer layer: Int) -> CGFloat {
+        layer == 0 ? standardCornerRadius : panelCornerRadius
     }
 
     private func matchScore(for candidateFrame: CGRect, referenceFrame: CGRect) -> Double {
@@ -590,12 +616,12 @@ final class ActiveWindowTracker {
         return overlapScore * 1_000 - centerDistance
     }
 
-    private func deduplicatedFrames(_ frames: [CGRect]) -> [CGRect] {
-        var deduplicated: [CGRect] = []
+    private func deduplicatedCutouts(_ cutouts: [WindowCutout]) -> [WindowCutout] {
+        var deduplicated: [WindowCutout] = []
 
-        for frame in frames {
-            guard !deduplicated.contains(where: { $0.nearlyEquals(frame) }) else { continue }
-            deduplicated.append(frame)
+        for cutout in cutouts {
+            guard !deduplicated.contains(where: { $0.frame.nearlyEquals(cutout.frame) }) else { continue }
+            deduplicated.append(cutout)
         }
 
         return deduplicated
@@ -609,15 +635,15 @@ final class ActiveWindowTracker {
         }
     }
 
-    private func updateState(frames: [CGRect], statusMessage: String?) {
-        guard highlightedWindowFrames != frames || self.statusMessage != statusMessage else { return }
-        highlightedWindowFrames = frames
+    private func updateState(cutouts: [WindowCutout], statusMessage: String?) {
+        guard highlightedWindowCutouts != cutouts || self.statusMessage != statusMessage else { return }
+        highlightedWindowCutouts = cutouts
         self.statusMessage = statusMessage
         publishUpdate()
     }
 
     private func publishUpdate() {
-        onUpdate?(highlightedWindowFrames, statusMessage)
+        onUpdate?(highlightedWindowCutouts, statusMessage)
     }
 
     private func screen(for displayID: CGDirectDisplayID) -> NSScreen? {
@@ -660,12 +686,15 @@ private struct AXFrameCandidate {
 }
 
 private extension Array where Element == CGRect {
-    func removingContainerFrames(containerExpansionTolerance: CGFloat = 12) -> [CGRect] {
+    func removingContainerFrames() -> [CGRect] {
         filter { candidate in
             !contains { other in
-                guard candidate != other else { return false }
-                return candidate.contains(other.insetBy(dx: -containerExpansionTolerance, dy: -containerExpansionTolerance)) &&
-                    candidate.area > other.area * 1.35
+                guard candidate != other,
+                      candidate.area > other.area * 1.01 else {
+                    return false
+                }
+                let expandedCandidate = candidate.insetBy(dx: -4, dy: -4)
+                return expandedCandidate.contains(other)
             }
         }
     }

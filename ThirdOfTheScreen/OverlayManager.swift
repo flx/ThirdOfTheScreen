@@ -1,6 +1,14 @@
 import AppKit
 import SwiftUI
 
+struct ScreenCutout {
+    let frame: CGRect
+    let topLeadingRadius: CGFloat
+    let topTrailingRadius: CGFloat
+    let bottomLeadingRadius: CGFloat
+    let bottomTrailingRadius: CGFloat
+}
+
 @MainActor
 final class OverlayManager: ObservableObject {
     static let shared = OverlayManager()
@@ -49,7 +57,7 @@ final class OverlayManager: ObservableObject {
     private var observers: [NSObjectProtocol] = []
     private var workspaceObservers: [NSObjectProtocol] = []
     private let activeWindowTracker = ActiveWindowTracker()
-    private var highlightedWindowFrames: [CGRect] = []
+    private var highlightedWindowCutouts: [WindowCutout] = []
     private var hasRestoredState = false
 
     private enum DefaultsKey {
@@ -62,9 +70,9 @@ final class OverlayManager: ObservableObject {
             self?.excludedWindowNumbers ?? []
         }
 
-        activeWindowTracker.onUpdate = { [weak self] highlightedWindowFrames, statusMessage in
+        activeWindowTracker.onUpdate = { [weak self] highlightedWindowCutouts, statusMessage in
             guard let self else { return }
-            self.highlightedWindowFrames = highlightedWindowFrames
+            self.highlightedWindowCutouts = highlightedWindowCutouts
             self.emphasisStatusMessage = statusMessage
             self.refreshOverlay()
         }
@@ -141,14 +149,14 @@ final class OverlayManager: ObservableObject {
             isActiveWindowEmphasisEnabled = didStart
             emphasisStatusMessage = activeWindowTracker.statusMessage
             if !didStart {
-                highlightedWindowFrames = []
+                highlightedWindowCutouts = []
             }
             UserDefaults.standard.set(didStart, forKey: DefaultsKey.emphasizeActiveWindowEnabled)
         } else {
             activeWindowTracker.stop()
             isActiveWindowEmphasisEnabled = false
             emphasisStatusMessage = nil
-            highlightedWindowFrames = []
+            highlightedWindowCutouts = []
             UserDefaults.standard.set(false, forKey: DefaultsKey.emphasizeActiveWindowEnabled)
         }
 
@@ -182,7 +190,7 @@ final class OverlayManager: ObservableObject {
                 showGrid: isGridOverlayEnabled,
                 emphasisEnabled: isActiveWindowEmphasisEnabled,
                 emphasisOpacity: emphasisStrength.opacity,
-                activeWindowCutouts: localCutoutRects(for: screen)
+                activeWindowCutouts: localCutouts(for: screen)
             )
 
             if let entry = overlayPanels[displayID] {
@@ -219,18 +227,39 @@ final class OverlayManager: ObservableObject {
         overlayPanels.removeAll()
     }
 
-    private func localCutoutRects(for screen: NSScreen) -> [CGRect] {
+    private func localCutouts(for screen: NSScreen) -> [ScreenCutout] {
         guard isActiveWindowEmphasisEnabled else { return [] }
 
-        return highlightedWindowFrames.compactMap { highlightedWindowFrame in
-            let intersection = highlightedWindowFrame.intersection(screen.visibleFrame)
+        let visibleFrame = screen.visibleFrame
+        let tolerance: CGFloat = 1
+
+        return highlightedWindowCutouts.compactMap { cutout in
+            let intersection = cutout.frame.intersection(visibleFrame)
             guard !intersection.isNull, !intersection.isEmpty else { return nil }
 
-            return CGRect(
-                x: intersection.minX - screen.visibleFrame.minX,
-                y: screen.visibleFrame.maxY - intersection.maxY,
+            let localFrame = CGRect(
+                x: intersection.minX - visibleFrame.minX,
+                y: visibleFrame.maxY - intersection.maxY,
                 width: intersection.width,
                 height: intersection.height
+            )
+
+            let r = cutout.cornerRadius
+
+            // Zero the corner radius at any corner where either edge extends
+            // beyond the visible frame (the window continues off-screen there,
+            // so no rounded corner is visible).
+            let clippedLeft   = cutout.frame.minX < visibleFrame.minX + tolerance
+            let clippedRight  = cutout.frame.maxX > visibleFrame.maxX - tolerance
+            let clippedTop    = cutout.frame.maxY > visibleFrame.maxY - tolerance
+            let clippedBottom = cutout.frame.minY < visibleFrame.minY + tolerance
+
+            return ScreenCutout(
+                frame: localFrame,
+                topLeadingRadius:     (clippedTop    || clippedLeft)  ? 0 : r,
+                topTrailingRadius:    (clippedTop    || clippedRight) ? 0 : r,
+                bottomLeadingRadius:  (clippedBottom || clippedLeft)  ? 0 : r,
+                bottomTrailingRadius: (clippedBottom || clippedRight) ? 0 : r
             )
         }
     }

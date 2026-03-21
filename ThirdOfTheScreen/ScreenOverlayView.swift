@@ -4,7 +4,7 @@ struct ScreenOverlayView: View {
     let showGrid: Bool
     let emphasisEnabled: Bool
     let emphasisOpacity: Double
-    let activeWindowCutouts: [CGRect]
+    let activeWindowCutouts: [ScreenCutout]
 
     private let accent = Color(red: 0.11, green: 0.84, blue: 0.73)
     private let emphasisTint = Color(red: 0.07, green: 0.08, blue: 0.10)
@@ -22,10 +22,16 @@ struct ScreenOverlayView: View {
                         .overlay(alignment: .topLeading) {
                             ZStack(alignment: .topLeading) {
                                 ForEach(Array(activeWindowCutouts.enumerated()), id: \.offset) { _, cutout in
-                                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                        .frame(width: cutout.width, height: cutout.height)
-                                        .position(x: cutout.midX, y: cutout.midY)
-                                        .blendMode(.destinationOut)
+                                    UnevenRoundedRectangle(
+                                        topLeadingRadius: cutout.topLeadingRadius,
+                                        bottomLeadingRadius: cutout.bottomLeadingRadius,
+                                        bottomTrailingRadius: cutout.bottomTrailingRadius,
+                                        topTrailingRadius: cutout.topTrailingRadius,
+                                        style: .continuous
+                                    )
+                                    .frame(width: cutout.frame.width, height: cutout.frame.height)
+                                    .position(x: cutout.frame.midX, y: cutout.frame.midY)
+                                    .blendMode(.destinationOut)
                                 }
                             }
                             .frame(width: width, height: height, alignment: .topLeading)
