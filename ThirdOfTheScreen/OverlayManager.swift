@@ -246,20 +246,21 @@ final class OverlayManager: ObservableObject {
 
             let r = cutout.cornerRadius
 
-            // Zero the corner radius at any corner where either edge extends
-            // beyond the visible frame (the window continues off-screen there,
-            // so no rounded corner is visible).
-            let clippedLeft   = cutout.frame.minX < visibleFrame.minX + tolerance
-            let clippedRight  = cutout.frame.maxX > visibleFrame.maxX - tolerance
-            let clippedTop    = cutout.frame.maxY > visibleFrame.maxY - tolerance
-            let clippedBottom = cutout.frame.minY < visibleFrame.minY + tolerance
+            // Only zero a corner's radius when the window extends far enough
+            // beyond the visible frame that the rounded corner is fully
+            // off-screen.  A window merely touching the edge still has its
+            // corner visible.
+            let clippedLeft   = cutout.frame.minX < visibleFrame.minX - r
+            let clippedRight  = cutout.frame.maxX > visibleFrame.maxX + r
+            let clippedTop    = cutout.frame.maxY > visibleFrame.maxY + r
+            let clippedBottom = cutout.frame.minY < visibleFrame.minY - r
 
             return ScreenCutout(
                 frame: localFrame,
-                topLeadingRadius:     (clippedTop    || clippedLeft)  ? 0 : r,
-                topTrailingRadius:    (clippedTop    || clippedRight) ? 0 : r,
-                bottomLeadingRadius:  (clippedBottom || clippedLeft)  ? 0 : r,
-                bottomTrailingRadius: (clippedBottom || clippedRight) ? 0 : r
+                topLeadingRadius:     (clippedTop    && clippedLeft)  ? 0 : r,
+                topTrailingRadius:    (clippedTop    && clippedRight) ? 0 : r,
+                bottomLeadingRadius:  (clippedBottom && clippedLeft)  ? 0 : r,
+                bottomTrailingRadius: (clippedBottom && clippedRight) ? 0 : r
             )
         }
     }
