@@ -2,12 +2,8 @@ import SwiftUI
 
 struct ScreenOverlayView: View {
     let showGrid: Bool
-    let emphasisEnabled: Bool
-    let emphasisOpacity: Double
-    let activeWindowCutouts: [ScreenCutout]
 
     private let accent = Color(red: 0.92, green: 0.25, blue: 0.30)
-    private let emphasisTint = Color(red: 0.07, green: 0.08, blue: 0.10)
 
     var body: some View {
         GeometryReader { proxy in
@@ -15,31 +11,8 @@ struct ScreenOverlayView: View {
             let height = proxy.size.height
             let columnWidth = width / 3
 
-            ZStack(alignment: .topLeading) {
-                if emphasisEnabled, !activeWindowCutouts.isEmpty {
-                    Rectangle()
-                        .fill(emphasisTint.opacity(emphasisOpacity))
-                        .overlay(alignment: .topLeading) {
-                            ZStack(alignment: .topLeading) {
-                                ForEach(Array(activeWindowCutouts.enumerated()), id: \.offset) { _, cutout in
-                                    UnevenRoundedRectangle(
-                                        topLeadingRadius: cutout.topLeadingRadius,
-                                        bottomLeadingRadius: cutout.bottomLeadingRadius,
-                                        bottomTrailingRadius: cutout.bottomTrailingRadius,
-                                        topTrailingRadius: cutout.topTrailingRadius,
-                                        style: .continuous
-                                    )
-                                    .frame(width: cutout.frame.width, height: cutout.frame.height)
-                                    .position(x: cutout.frame.midX, y: cutout.frame.midY)
-                                    .blendMode(.destinationOut)
-                                }
-                            }
-                            .frame(width: width, height: height, alignment: .topLeading)
-                        }
-                        .compositingGroup()
-                }
-
-                if showGrid {
+            if showGrid {
+                ZStack(alignment: .topLeading) {
                     HStack(spacing: 0) {
                         ForEach(0..<3, id: \.self) { index in
                             Rectangle()

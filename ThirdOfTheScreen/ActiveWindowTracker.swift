@@ -38,6 +38,9 @@ final class ActiveWindowTracker: NSObject {
     private(set) var highlightedWindowCutouts: [WindowCutout] = []
     private(set) var statusMessage: String?
 
+    var primaryWindowNumber: Int? { trackedPrimaryWindowNumber }
+    var primaryWindowFrame: CGRect? { trackedPrimaryWindowFrame }
+
     private var workspaceObservers: [NSObjectProtocol] = []
     private var fastPathDisplayLink: CADisplayLink?
     private var fastPathFallbackTimer: Timer?

@@ -1,13 +1,8 @@
 import AppKit
+import OSLog
 import SwiftUI
 
-struct ScreenCutout: Equatable {
-    let frame: CGRect
-    let topLeadingRadius: CGFloat
-    let topTrailingRadius: CGFloat
-    let bottomLeadingRadius: CGFloat
-    let bottomTrailingRadius: CGFloat
-}
+private let overlayLog = Logger(subsystem: "com.felix.thirdofthescreen", category: "Overlay")
 
 @MainActor
 final class OverlayManager: ObservableObject {
@@ -57,8 +52,10 @@ final class OverlayManager: ObservableObject {
     private var observers: [NSObjectProtocol] = []
     private var workspaceObservers: [NSObjectProtocol] = []
     private let activeWindowTracker = ActiveWindowTracker()
-    private var highlightedWindowCutouts: [WindowCutout] = []
+    private let emphasisStrips = EmphasisStripsController()
     private var hasRestoredState = false
+
+    private static let emphasisTintColor = NSColor(red: 0.07, green: 0.08, blue: 0.10, alpha: 1.0)
 
     private enum DefaultsKey {
         static let emphasizeActiveWindowEnabled = "emphasizeActiveWindowEnabled"
@@ -70,12 +67,13 @@ final class OverlayManager: ObservableObject {
             self?.excludedWindowNumbers ?? []
         }
 
-        activeWindowTracker.onUpdate = { [weak self] highlightedWindowCutouts, statusMessage in
+        activeWindowTracker.onUpdate = { [weak self] _, statusMessage in
             guard let self else { return }
-            self.highlightedWindowCutouts = highlightedWindowCutouts
             self.emphasisStatusMessage = statusMessage
-            self.refreshOverlay()
+            self.updateEmphasisStrips()
         }
+
+        emphasisStrips.setAppearance(color: Self.emphasisTintColor, opacity: emphasisStrength.opacity)
 
         let notificationCenter = NotificationCenter.default
         observers.append(
@@ -118,7 +116,9 @@ final class OverlayManager: ObservableObject {
     }
 
     private var excludedWindowNumbers: Set<Int> {
-        Set(overlayPanels.values.map { $0.panel.windowNumber })
+        var set = Set(overlayPanels.values.map { $0.panel.windowNumber })
+        set.formUnion(emphasisStrips.excludedWindowNumbers)
+        return set
     }
 
     func restoreState() {
@@ -128,6 +128,7 @@ final class OverlayManager: ObservableObject {
         if let storedStrength = UserDefaults.standard.string(forKey: DefaultsKey.emphasisStrength),
            let emphasisStrength = EmphasisStrength(rawValue: storedStrength) {
             self.emphasisStrength = emphasisStrength
+            emphasisStrips.setAppearance(color: Self.emphasisTintColor, opacity: emphasisStrength.opacity)
         }
 
         setGridOverlayEnabled(true)
@@ -149,25 +150,26 @@ final class OverlayManager: ObservableObject {
             isActiveWindowEmphasisEnabled = didStart
             emphasisStatusMessage = activeWindowTracker.statusMessage
             if !didStart {
-                highlightedWindowCutouts = []
+                emphasisStrips.clear()
             }
             UserDefaults.standard.set(didStart, forKey: DefaultsKey.emphasizeActiveWindowEnabled)
         } else {
             activeWindowTracker.stop()
             isActiveWindowEmphasisEnabled = false
             emphasisStatusMessage = nil
-            highlightedWindowCutouts = []
+            emphasisStrips.clear()
             UserDefaults.standard.set(false, forKey: DefaultsKey.emphasizeActiveWindowEnabled)
         }
 
         refreshOverlay()
+        updateEmphasisStrips()
     }
 
     func setEmphasisStrength(_ emphasisStrength: EmphasisStrength) {
         guard self.emphasisStrength != emphasisStrength else { return }
         self.emphasisStrength = emphasisStrength
         UserDefaults.standard.set(emphasisStrength.rawValue, forKey: DefaultsKey.emphasisStrength)
-        refreshOverlay()
+        emphasisStrips.setAppearance(color: Self.emphasisTintColor, opacity: emphasisStrength.opacity)
     }
 
     func refreshOverlay() {
@@ -177,6 +179,29 @@ final class OverlayManager: ObservableObject {
         }
 
         synchronizeOverlayPanels()
+    }
+
+    private var lastEmphasisWindowNumber: Int?
+
+    private func updateEmphasisStrips() {
+        guard isActiveWindowEmphasisEnabled else {
+            emphasisStrips.clear()
+            return
+        }
+
+        guard let windowNumber = activeWindowTracker.primaryWindowNumber,
+              let bounds = activeWindowTracker.primaryWindowFrame
+        else {
+            overlayLog.notice("updateEmphasisStrips: no primary (windowNumber=\(self.activeWindowTracker.primaryWindowNumber ?? -1), frame-present=\(self.activeWindowTracker.primaryWindowFrame != nil)) — keeping current parenting")
+            return
+        }
+
+        if lastEmphasisWindowNumber != windowNumber {
+            overlayLog.notice("updateEmphasisStrips: primary window changed \(self.lastEmphasisWindowNumber ?? -1) -> \(windowNumber)")
+            lastEmphasisWindowNumber = windowNumber
+        }
+
+        emphasisStrips.setActiveWindow(windowID: CGWindowID(windowNumber), cocoaBounds: bounds)
     }
 
     private func synchronizeOverlayPanels() {
@@ -190,12 +215,7 @@ final class OverlayManager: ObservableObject {
             guard !screen.visibleFrame.isEmpty, let displayID = screen.displayID else { continue }
             currentDisplayIDs.insert(displayID)
 
-            let overlayView = ScreenOverlayView(
-                showGrid: isGridOverlayEnabled,
-                emphasisEnabled: isActiveWindowEmphasisEnabled,
-                emphasisOpacity: emphasisStrength.opacity,
-                activeWindowCutouts: localCutouts(for: screen)
-            )
+            let overlayView = ScreenOverlayView(showGrid: isGridOverlayEnabled)
 
             if let entry = overlayPanels[displayID] {
                 if entry.panel.frame != screen.visibleFrame {
@@ -229,44 +249,6 @@ final class OverlayManager: ObservableObject {
             entry.panel.close()
         }
         overlayPanels.removeAll()
-    }
-
-    private func localCutouts(for screen: NSScreen) -> [ScreenCutout] {
-        guard isActiveWindowEmphasisEnabled else { return [] }
-
-        let visibleFrame = screen.visibleFrame
-        let tolerance: CGFloat = 1
-
-        return highlightedWindowCutouts.compactMap { cutout in
-            let intersection = cutout.frame.intersection(visibleFrame)
-            guard !intersection.isNull, !intersection.isEmpty else { return nil }
-
-            let localFrame = CGRect(
-                x: intersection.minX - visibleFrame.minX,
-                y: visibleFrame.maxY - intersection.maxY,
-                width: intersection.width,
-                height: intersection.height
-            )
-
-            let r = cutout.cornerRadius
-
-            // Only zero a corner's radius when the window extends far enough
-            // beyond the visible frame that the rounded corner is fully
-            // off-screen.  A window merely touching the edge still has its
-            // corner visible.
-            let clippedLeft   = cutout.frame.minX < visibleFrame.minX - r
-            let clippedRight  = cutout.frame.maxX > visibleFrame.maxX + r
-            let clippedTop    = cutout.frame.maxY > visibleFrame.maxY + r
-            let clippedBottom = cutout.frame.minY < visibleFrame.minY - r
-
-            return ScreenCutout(
-                frame: localFrame,
-                topLeadingRadius:     (clippedTop    && clippedLeft)  ? 0 : r,
-                topTrailingRadius:    (clippedTop    && clippedRight) ? 0 : r,
-                bottomLeadingRadius:  (clippedBottom && clippedLeft)  ? 0 : r,
-                bottomTrailingRadius: (clippedBottom && clippedRight) ? 0 : r
-            )
-        }
     }
 }
 
