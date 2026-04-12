@@ -6,7 +6,7 @@ struct ScreenOverlayView: View {
     let emphasisOpacity: Double
     let activeWindowCutouts: [ScreenCutout]
 
-    private let accent = Color(red: 0.11, green: 0.84, blue: 0.73)
+    private let accent = Color(red: 0.92, green: 0.25, blue: 0.30)
     private let emphasisTint = Color(red: 0.07, green: 0.08, blue: 0.10)
 
     var body: some View {

@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-struct ScreenCutout {
+struct ScreenCutout: Equatable {
     let frame: CGRect
     let topLeadingRadius: CGFloat
     let topTrailingRadius: CGFloat
@@ -181,6 +181,10 @@ final class OverlayManager: ObservableObject {
 
     private func synchronizeOverlayPanels() {
         var currentDisplayIDs = Set<CGDirectDisplayID>()
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
 
         for screen in NSScreen.screens {
             guard !screen.visibleFrame.isEmpty, let displayID = screen.displayID else { continue }

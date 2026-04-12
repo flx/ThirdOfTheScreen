@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import Foundation
+import QuartzCore
 
 struct WindowCutout: Equatable {
     let frame: CGRect
@@ -8,10 +9,11 @@ struct WindowCutout: Equatable {
 }
 
 @MainActor
-final class ActiveWindowTracker {
+final class ActiveWindowTracker: NSObject {
     private static let accessibilityAccessMessage =
         "Allow Accessibility access in System Settings > Privacy & Security > Accessibility. If it is already enabled, remove and re-add Third Of The Screen."
-    private static let fallbackRefreshInterval = 1.0 / 60.0
+    private static let fastPathRefreshInterval = 1.0 / 120.0
+    private static let slowPathRefreshInterval = 1.0 / 10.0
     private static let menuBarAttachmentTolerance: CGFloat = 48
     private static let focusedElementSearchDepth = 16
     private static let preferredTransientRoles: Set<String> = [
@@ -37,12 +39,20 @@ final class ActiveWindowTracker {
     private(set) var statusMessage: String?
 
     private var workspaceObservers: [NSObjectProtocol] = []
-    private var fallbackTimer: Timer?
+    private var fastPathDisplayLink: CADisplayLink?
+    private var fastPathFallbackTimer: Timer?
+    private var slowPathTimer: Timer?
     private var observedProcessID: pid_t?
     private var observedApplicationElement: AXUIElement?
     private var observedWindowElement: AXUIElement?
     private var observer: AXObserver?
     private var trackedPrimaryWindowFrame: CGRect?
+    private var trackedPrimaryWindowNumber: Int?
+    private var cachedPrimaryCutout: WindowCutout?
+    private var cachedAuxiliaryCutouts: [WindowCutout] = []
+    private var cachedAuxiliaryWindows: [(windowNumber: Int, cornerRadius: CGFloat)] = []
+    private var cachedTransientCutouts: [WindowCutout] = []
+    private var cachedStatusMessage: String?
 
     func start(promptForAccess: Bool) -> Bool {
         guard isAccessibilityTrusted(prompt: promptForAccess) else {
@@ -54,7 +64,8 @@ final class ActiveWindowTracker {
         }
 
         installWorkspaceObserversIfNeeded()
-        startFallbackTimer()
+        startFastPathTimer()
+        startSlowPathTimer()
         attachToFrontmostApplication()
         refreshFocusContext()
         return true
@@ -62,10 +73,17 @@ final class ActiveWindowTracker {
 
     func stop() {
         removeWorkspaceObservers()
-        stopFallbackTimer()
+        stopFastPathTimer()
+        stopSlowPathTimer()
         tearDownAccessibilityObservation()
         highlightedWindowCutouts = []
         trackedPrimaryWindowFrame = nil
+        trackedPrimaryWindowNumber = nil
+        cachedPrimaryCutout = nil
+        cachedAuxiliaryCutouts = []
+        cachedAuxiliaryWindows = []
+        cachedTransientCutouts = []
+        cachedStatusMessage = nil
         statusMessage = nil
         publishUpdate()
     }
@@ -74,6 +92,7 @@ final class ActiveWindowTracker {
         guard AXIsProcessTrusted() else {
             highlightedWindowCutouts = []
             trackedPrimaryWindowFrame = nil
+            trackedPrimaryWindowNumber = nil
             statusMessage = Self.accessibilityAccessMessage
             publishUpdate()
             return
@@ -128,29 +147,116 @@ final class ActiveWindowTracker {
         workspaceObservers.removeAll()
     }
 
-    private func startFallbackTimer() {
-        guard fallbackTimer == nil else { return }
+    private func startFastPathTimer() {
+        // Drive the fast path from both a display-synced CADisplayLink *and* a 120 Hz
+        // timer. The display link is ideal when it fires; the timer is a safety net in
+        // case the vsync callback is missed (e.g. in some Space transitions). Duplicate
+        // ticks are cheap because fastPathTick() bails when nothing has moved.
+        if fastPathDisplayLink == nil, let screen = NSScreen.main ?? NSScreen.screens.first {
+            let link = screen.displayLink(target: self, selector: #selector(handleDisplayLinkTick(_:)))
+            link.add(to: .main, forMode: .common)
+            fastPathDisplayLink = link
+        }
 
-        // Run in common modes so refreshes continue while the user is actively dragging a window.
-        let timer = Timer(timeInterval: Self.fallbackRefreshInterval, repeats: true) { [weak self] _ in
+        if fastPathFallbackTimer == nil {
+            let timer = Timer(timeInterval: Self.fastPathRefreshInterval, repeats: true) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.fastPathTick()
+                }
+            }
+            timer.tolerance = 0
+            RunLoop.main.add(timer, forMode: .common)
+            fastPathFallbackTimer = timer
+        }
+    }
+
+    private func stopFastPathTimer() {
+        fastPathDisplayLink?.invalidate()
+        fastPathDisplayLink = nil
+        fastPathFallbackTimer?.invalidate()
+        fastPathFallbackTimer = nil
+    }
+
+    @objc private func handleDisplayLinkTick(_ sender: CADisplayLink) {
+        fastPathTick()
+    }
+
+    private func startSlowPathTimer() {
+        guard slowPathTimer == nil else { return }
+
+        // Slow path: backstop for the AX-driven focus refresh. Runs the full snapshot +
+        // transient-resolution pass at a low rate so focused/transient UI stays in sync
+        // even if AX notifications are missed.
+        let timer = Timer(timeInterval: Self.slowPathRefreshInterval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.refreshTrackedWindowFrames()
             }
         }
-        timer.tolerance = 0.005
+        timer.tolerance = Self.slowPathRefreshInterval / 4
         RunLoop.main.add(timer, forMode: .common)
-        fallbackTimer = timer
+        slowPathTimer = timer
     }
 
-    private func stopFallbackTimer() {
-        fallbackTimer?.invalidate()
-        fallbackTimer = nil
+    private func stopSlowPathTimer() {
+        slowPathTimer?.invalidate()
+        slowPathTimer = nil
+    }
+
+    private func fastPathTick() {
+        guard let windowNumber = trackedPrimaryWindowNumber else { return }
+        guard let observedBounds = fetchWindowBounds(windowNumber: windowNumber) else { return }
+
+        let cornerRadius = cachedPrimaryCutout?.cornerRadius ?? Self.standardCornerRadius
+        let updatedPrimary = WindowCutout(frame: observedBounds, cornerRadius: cornerRadius)
+
+        let refreshedAuxiliary = cachedAuxiliaryWindows.compactMap { entry -> WindowCutout? in
+            guard let auxBounds = fetchWindowBounds(windowNumber: entry.windowNumber) else { return nil }
+            return WindowCutout(frame: auxBounds, cornerRadius: entry.cornerRadius)
+        }
+
+        let primaryUnchanged = cachedPrimaryCutout == updatedPrimary
+        let auxiliaryUnchanged = refreshedAuxiliary == cachedAuxiliaryCutouts
+        if primaryUnchanged && auxiliaryUnchanged { return }
+
+        cachedPrimaryCutout = updatedPrimary
+        cachedAuxiliaryCutouts = refreshedAuxiliary
+        trackedPrimaryWindowFrame = observedBounds
+        commitCachedCutouts()
+    }
+
+    private func fetchWindowBounds(windowNumber: Int) -> CGRect? {
+        guard let infoList = CGWindowListCopyWindowInfo(
+            [.optionIncludingWindow],
+            CGWindowID(windowNumber)
+        ) as? [[String: Any]],
+            let info = infoList.first,
+            let boundsDictionary = info[kCGWindowBounds as String] as? NSDictionary,
+            let windowServerBounds = CGRect(dictionaryRepresentation: boundsDictionary),
+            let cocoaBounds = convertFromWindowServerCoordinates(windowServerBounds),
+            cocoaBounds.width >= 4,
+            cocoaBounds.height >= 4
+        else {
+            return nil
+        }
+
+        return cocoaBounds
+    }
+
+    private func commitCachedCutouts() {
+        var cutouts: [WindowCutout] = []
+        if let cachedPrimaryCutout {
+            cutouts.append(cachedPrimaryCutout)
+        }
+        cutouts.append(contentsOf: cachedAuxiliaryCutouts)
+        cutouts.append(contentsOf: cachedTransientCutouts)
+        updateState(cutouts: deduplicatedCutouts(cutouts), statusMessage: cachedStatusMessage)
     }
 
     private func attachToFrontmostApplication() {
         guard let app = NSWorkspace.shared.frontmostApplication else {
             tearDownAccessibilityObservation()
             trackedPrimaryWindowFrame = nil
+            trackedPrimaryWindowNumber = nil
             return
         }
 
@@ -159,6 +265,7 @@ final class ActiveWindowTracker {
 
         tearDownAccessibilityObservation()
         trackedPrimaryWindowFrame = nil
+        trackedPrimaryWindowNumber = nil
 
         observedProcessID = processID
         observedApplicationElement = AXUIElementCreateApplication(processID)
@@ -237,6 +344,7 @@ final class ActiveWindowTracker {
     private func refreshFocusContext() {
         guard let observedApplicationElement, let processID = observedProcessID else {
             trackedPrimaryWindowFrame = nil
+            trackedPrimaryWindowNumber = nil
             refreshTrackedWindowFrames()
             return
         }
@@ -244,12 +352,14 @@ final class ActiveWindowTracker {
         let ownProcessID = ProcessInfo.processInfo.processIdentifier
         if processID == ownProcessID {
             trackedPrimaryWindowFrame = nil
+            trackedPrimaryWindowNumber = nil
             refreshTrackedWindowFrames(statusMessageWhenUnavailable: nil)
             return
         }
 
         guard let focusedWindowElement = focusedWindowElement(from: observedApplicationElement) else {
             trackedPrimaryWindowFrame = nil
+            trackedPrimaryWindowNumber = nil
             refreshTrackedWindowFrames(statusMessageWhenUnavailable: "Active window unavailable.")
             return
         }
@@ -259,10 +369,14 @@ final class ActiveWindowTracker {
         guard let axFrame = axFrame(for: focusedWindowElement),
               let cocoaFrame = convertFromWindowServerCoordinates(axFrame) else {
             trackedPrimaryWindowFrame = nil
+            trackedPrimaryWindowNumber = nil
             refreshTrackedWindowFrames(statusMessageWhenUnavailable: "Active window unavailable.")
             return
         }
 
+        if let previousFrame = trackedPrimaryWindowFrame, !previousFrame.nearlyEquals(cocoaFrame, tolerance: 4) {
+            trackedPrimaryWindowNumber = nil
+        }
         trackedPrimaryWindowFrame = cocoaFrame
         refreshTrackedWindowFrames()
     }
@@ -274,51 +388,71 @@ final class ActiveWindowTracker {
             ? menuBarTransientCutouts(from: allWindowSnapshots)
             : focusedTransientCutouts
 
+        cachedTransientCutouts = transientCutouts
+
         guard let processID = observedProcessID else {
             trackedPrimaryWindowFrame = nil
-            updateState(
-                cutouts: deduplicatedCutouts(transientCutouts),
-                statusMessage: transientCutouts.isEmpty ? statusMessageWhenUnavailable : nil
-            )
+            trackedPrimaryWindowNumber = nil
+            cachedPrimaryCutout = nil
+            cachedAuxiliaryCutouts = []
+            cachedAuxiliaryWindows = []
+            cachedStatusMessage = transientCutouts.isEmpty ? statusMessageWhenUnavailable : nil
+            commitCachedCutouts()
             return
         }
 
         let ownProcessID = ProcessInfo.processInfo.processIdentifier
         if processID == ownProcessID {
             trackedPrimaryWindowFrame = nil
-            updateState(
-                cutouts: deduplicatedCutouts(transientCutouts),
-                statusMessage: transientCutouts.isEmpty ? statusMessageWhenUnavailable : nil
-            )
+            trackedPrimaryWindowNumber = nil
+            cachedPrimaryCutout = nil
+            cachedAuxiliaryCutouts = []
+            cachedAuxiliaryWindows = []
+            cachedStatusMessage = transientCutouts.isEmpty ? statusMessageWhenUnavailable : nil
+            commitCachedCutouts()
             return
         }
 
-        guard let trackedPrimaryWindowFrame else {
-            updateState(
-                cutouts: deduplicatedCutouts(transientCutouts),
-                statusMessage: transientCutouts.isEmpty ? "Active window unavailable." : nil
-            )
+        guard let referenceFrame = trackedPrimaryWindowFrame else {
+            cachedPrimaryCutout = nil
+            cachedAuxiliaryCutouts = []
+            cachedAuxiliaryWindows = []
+            cachedStatusMessage = transientCutouts.isEmpty ? "Active window unavailable." : nil
+            commitCachedCutouts()
             return
         }
 
         let appSnapshots = allWindowSnapshots.filter { $0.ownerPID == processID }
 
-        let primaryCutout = bestMatchingPrimaryCutout(
+        let primarySnapshot = bestMatchingPrimarySnapshot(
             from: appSnapshots,
-            near: trackedPrimaryWindowFrame
-        ) ?? WindowCutout(frame: trackedPrimaryWindowFrame, cornerRadius: Self.standardCornerRadius)
+            near: referenceFrame
+        )
 
-        self.trackedPrimaryWindowFrame = primaryCutout.frame
+        let primaryCutout: WindowCutout
+        if let primarySnapshot {
+            primaryCutout = WindowCutout(
+                frame: primarySnapshot.bounds,
+                cornerRadius: Self.cornerRadius(forLayer: primarySnapshot.layer)
+            )
+            trackedPrimaryWindowNumber = primarySnapshot.windowNumber
+        } else {
+            primaryCutout = WindowCutout(frame: referenceFrame, cornerRadius: Self.standardCornerRadius)
+        }
 
-        let auxiliaryCutouts = auxiliaryCutouts(
+        trackedPrimaryWindowFrame = primaryCutout.frame
+        cachedPrimaryCutout = primaryCutout
+        cachedAuxiliaryCutouts = auxiliaryCutouts(
             from: appSnapshots,
             excludingPrimaryFrame: primaryCutout.frame
         )
-
-        updateState(
-            cutouts: deduplicatedCutouts([primaryCutout] + auxiliaryCutouts + transientCutouts),
-            statusMessage: nil
+        cachedAuxiliaryWindows = auxiliaryWindows(
+            from: appSnapshots,
+            excludingPrimaryFrame: primaryCutout.frame
         )
+        cachedStatusMessage = nil
+
+        commitCachedCutouts()
     }
 
     private func focusedWindowElement(from applicationElement: AXUIElement) -> AXUIElement? {
@@ -576,20 +710,16 @@ final class ActiveWindowTracker {
         return bestSnapshot
     }
 
-    private func bestMatchingPrimaryCutout(
+    private func bestMatchingPrimarySnapshot(
         from snapshots: [WindowSnapshot],
         near referenceFrame: CGRect
-    ) -> WindowCutout? {
-        guard let best = snapshots
-            .filter({ $0.layer == 0 })
-            .max(by: { lhs, rhs in
+    ) -> WindowSnapshot? {
+        snapshots
+            .filter { $0.layer == 0 }
+            .max { lhs, rhs in
                 matchScore(for: lhs.bounds, referenceFrame: referenceFrame)
                     < matchScore(for: rhs.bounds, referenceFrame: referenceFrame)
-            }) else {
-            return nil
-        }
-
-        return WindowCutout(frame: best.bounds, cornerRadius: Self.cornerRadius(forLayer: best.layer))
+            }
     }
 
     private func auxiliaryCutouts(
@@ -600,6 +730,16 @@ final class ActiveWindowTracker {
             .filter { $0.layer > 0 }
             .filter { !$0.bounds.nearlyEquals(primaryFrame) }
             .map { WindowCutout(frame: $0.bounds, cornerRadius: Self.cornerRadius(forLayer: $0.layer)) }
+    }
+
+    private func auxiliaryWindows(
+        from snapshots: [WindowSnapshot],
+        excludingPrimaryFrame primaryFrame: CGRect
+    ) -> [(windowNumber: Int, cornerRadius: CGFloat)] {
+        snapshots
+            .filter { $0.layer > 0 }
+            .filter { !$0.bounds.nearlyEquals(primaryFrame) }
+            .map { ($0.windowNumber, Self.cornerRadius(forLayer: $0.layer)) }
     }
 
     private static func cornerRadius(forLayer layer: Int) -> CGFloat {
