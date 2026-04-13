@@ -32,13 +32,44 @@ final class OverlayManager: ObservableObject {
         var opacity: Double {
             switch self {
             case .subtle:
-                0.24
+                0.12
             case .balanced:
-                0.36
+                0.22
             case .strong:
-                0.50
+                0.36
             case .heavy:
-                0.64
+                0.52
+            }
+        }
+    }
+
+    enum EmphasisTint: String, CaseIterable, Identifiable {
+        case neutral
+        case red
+        case green
+        case blue
+
+        var id: String { rawValue }
+
+        var label: String {
+            switch self {
+            case .neutral: "Neutral"
+            case .red: "Red"
+            case .green: "Green"
+            case .blue: "Blue"
+            }
+        }
+
+        var color: NSColor {
+            switch self {
+            case .neutral:
+                NSColor(red: 0.07, green: 0.08, blue: 0.10, alpha: 1.0)
+            case .red:
+                NSColor(red: 0.22, green: 0.05, blue: 0.05, alpha: 1.0)
+            case .green:
+                NSColor(red: 0.05, green: 0.18, blue: 0.07, alpha: 1.0)
+            case .blue:
+                NSColor(red: 0.05, green: 0.08, blue: 0.24, alpha: 1.0)
             }
         }
     }
@@ -47,6 +78,7 @@ final class OverlayManager: ObservableObject {
     @Published private(set) var isActiveWindowEmphasisEnabled = false
     @Published private(set) var emphasisStatusMessage: String?
     @Published private(set) var emphasisStrength: EmphasisStrength = .balanced
+    @Published private(set) var emphasisTint: EmphasisTint = .neutral
 
     private var overlayPanels: [CGDirectDisplayID: OverlayPanelEntry] = [:]
     private var observers: [NSObjectProtocol] = []
@@ -55,11 +87,10 @@ final class OverlayManager: ObservableObject {
     private let emphasisStrips = EmphasisStripsController()
     private var hasRestoredState = false
 
-    private static let emphasisTintColor = NSColor(red: 0.07, green: 0.08, blue: 0.10, alpha: 1.0)
-
     private enum DefaultsKey {
         static let emphasizeActiveWindowEnabled = "emphasizeActiveWindowEnabled"
         static let emphasisStrength = "emphasisStrength"
+        static let emphasisTint = "emphasisTint"
     }
 
     private init() {
@@ -73,7 +104,7 @@ final class OverlayManager: ObservableObject {
             self.updateEmphasisStrips()
         }
 
-        emphasisStrips.setAppearance(color: Self.emphasisTintColor, opacity: emphasisStrength.opacity)
+        applyEmphasisAppearance()
 
         let notificationCenter = NotificationCenter.default
         observers.append(
@@ -128,8 +159,14 @@ final class OverlayManager: ObservableObject {
         if let storedStrength = UserDefaults.standard.string(forKey: DefaultsKey.emphasisStrength),
            let emphasisStrength = EmphasisStrength(rawValue: storedStrength) {
             self.emphasisStrength = emphasisStrength
-            emphasisStrips.setAppearance(color: Self.emphasisTintColor, opacity: emphasisStrength.opacity)
         }
+
+        if let storedTint = UserDefaults.standard.string(forKey: DefaultsKey.emphasisTint),
+           let emphasisTint = EmphasisTint(rawValue: storedTint) {
+            self.emphasisTint = emphasisTint
+        }
+
+        applyEmphasisAppearance()
 
         setGridOverlayEnabled(true)
 
@@ -169,7 +206,18 @@ final class OverlayManager: ObservableObject {
         guard self.emphasisStrength != emphasisStrength else { return }
         self.emphasisStrength = emphasisStrength
         UserDefaults.standard.set(emphasisStrength.rawValue, forKey: DefaultsKey.emphasisStrength)
-        emphasisStrips.setAppearance(color: Self.emphasisTintColor, opacity: emphasisStrength.opacity)
+        applyEmphasisAppearance()
+    }
+
+    func setEmphasisTint(_ emphasisTint: EmphasisTint) {
+        guard self.emphasisTint != emphasisTint else { return }
+        self.emphasisTint = emphasisTint
+        UserDefaults.standard.set(emphasisTint.rawValue, forKey: DefaultsKey.emphasisTint)
+        applyEmphasisAppearance()
+    }
+
+    private func applyEmphasisAppearance() {
+        emphasisStrips.setAppearance(color: emphasisTint.color, opacity: emphasisStrength.opacity)
     }
 
     func refreshOverlay() {

@@ -20,6 +20,13 @@ struct ThirdOfTheScreenApp: App {
                 }
             }
 
+            Picker("Overlay Tint", selection: emphasisTintBinding) {
+                ForEach(OverlayManager.EmphasisTint.allCases) { emphasisTint in
+                    Text(emphasisTint.label)
+                        .tag(emphasisTint)
+                }
+            }
+
             if let emphasisStatusMessage = overlayManager.emphasisStatusMessage {
                 Text(emphasisStatusMessage)
                     .font(.caption)
@@ -78,6 +85,15 @@ struct ThirdOfTheScreenApp: App {
             get: { overlayManager.emphasisStrength },
             set: { emphasisStrength in
                 overlayManager.setEmphasisStrength(emphasisStrength)
+            }
+        )
+    }
+
+    private var emphasisTintBinding: Binding<OverlayManager.EmphasisTint> {
+        Binding(
+            get: { overlayManager.emphasisTint },
+            set: { emphasisTint in
+                overlayManager.setEmphasisTint(emphasisTint)
             }
         )
     }
