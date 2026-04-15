@@ -192,12 +192,25 @@ final class ActiveWindowTracker: NSObject {
         // even if AX notifications are missed.
         let timer = Timer(timeInterval: Self.slowPathRefreshInterval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.refreshTrackedWindowFrames()
+                self?.slowPathTick()
             }
         }
         timer.tolerance = Self.slowPathRefreshInterval / 4
         RunLoop.main.add(timer, forMode: .common)
         slowPathTimer = timer
+    }
+
+    private func slowPathTick() {
+        // If we have an AX observer attached to an app but no primary window
+        // locked in yet, the AX focus notification probably fired before we
+        // installed the observer (common when a brand-new app or window just
+        // launched). Retry the focus query so we self-heal within ~100 ms
+        // without the user needing to alt-tab away and back.
+        if trackedPrimaryWindowFrame == nil, observedApplicationElement != nil {
+            refreshFocusContext()
+        } else {
+            refreshTrackedWindowFrames()
+        }
     }
 
     private func stopSlowPathTimer() {
