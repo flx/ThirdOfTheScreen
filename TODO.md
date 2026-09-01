@@ -5,27 +5,17 @@ Tier (`trivial|standard|hi`) governs plan and review depth — it is not priorit
 Evidence for anything filed here lives in `arch-reviews/`. Work top to bottom
 within a section.
 
-All entries below were filed by the 2026-09-01 arch review of active-window
-tracking (`arch-reviews/2026-09-01-active-window-tracking.md` — read it before
-planning; it carries the verified mechanisms and the fix directions, including
-one deliberate NOT-filed list). Line numbers cite the uncommitted working copy
-of that date.
+The 2026-09-01 arch-review queue (active-window tracking,
+`arch-reviews/2026-09-01-active-window-tracking.md`) is fully cleared — all
+six built items shipped, and `(ax-observer-pool-per-app)` CLOSED without code
+on 2026-09-01: its trigger was Felix judging the ~100 ms cross-app cap still
+slow, and his verdict on the Release build was the opposite ("much faster").
+Records live in `DONE.md`.
 
 ## 0. Next up — work these first, in this order
 
+*(empty)*
 
 ## 1. Filed, not scheduled
 
-- [ ] (ax-observer-pool-per-app) **[standard · TRIGGERED — do not schedule
-  until it fires]** Step 2 of `(cross-app-activation-latency)`, deliberately
-  not built with step 1: one `AXObserver` per running application registered
-  for `kAXApplicationActivatedNotification` +
-  `kAXFocusedWindowChangedNotification`, maintained against workspace
-  launch/terminate notifications (the AltTab/yabai pattern) — sub-frame
-  cross-app switch latency instead of the ~100 ms cap the slow-path pid
-  compare provides. **Trigger: Felix reports the capped latency still feels
-  slow on the running app.** The pool costs real bookkeeping (observer
-  lifetime per pid, teardown on terminate, re-attach on relaunch); do not
-  build it speculatively.
-
-
+*(empty)*

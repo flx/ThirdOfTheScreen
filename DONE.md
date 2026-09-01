@@ -2,6 +2,14 @@
 
 Shipped items, newest first. Format: slug — date, commit, one-line record.
 
+- (ax-observer-pool-per-app) — 2026-09-01, CLOSED WITHOUT CODE, decided with
+  Felix. The item was TRIGGERED on him judging the ~100 ms cross-app cap
+  (from `(cross-app-activation-latency)`) still slow; testing the Release
+  build he reported the opposite — "much faster" — so the trigger can never
+  fire and the per-app AXObserver pool's bookkeeping is not bought. If
+  cross-app latency ever regresses, re-file from the entry preserved in this
+  repo's history (TODO.md at merge `9ed9921`) rather than re-deriving.
+
 - (fast-path-display-link-duty-cycle) — 2026-09-01, commit: see log. The
   CADisplayLink now duty-cycles: AX moved/resized wake it (and no longer
   trigger a full AX refresh per drag frame); the slow path pauses it 250 ms
