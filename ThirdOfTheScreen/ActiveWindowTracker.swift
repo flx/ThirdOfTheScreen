@@ -12,6 +12,8 @@ final class ActiveWindowTracker: NSObject {
         "Allow Accessibility access in System Settings > Privacy & Security > Accessibility. If it is already enabled, remove and re-add Third Of The Screen."
     private static let slowPathRefreshInterval = 1.0 / 10.0
     private static let missedBoundsGrace: CFTimeInterval = 0.06
+    private static let fastPathIdleTimeout: CFTimeInterval = 0.25
+    private static let slowTicksPerFocusResolve = 10
 
     var onUpdate: ((String?) -> Void)?
     var excludedWindowNumbersProvider: (() -> Set<Int>)?
@@ -23,6 +25,9 @@ final class ActiveWindowTracker: NSObject {
     private var workspaceObservers: [NSObjectProtocol] = []
     private var isRunning = false
     private var boundsMiss: (windowNumber: Int, since: CFTimeInterval)?
+    private var displayLinkScreenID: CGDirectDisplayID?
+    private var lastWindowMotionAt: CFTimeInterval = 0
+    private var slowTicksSinceFocusResolve = 0
     private var fastPathDisplayLink: CADisplayLink?
     private var slowPathTimer: Timer?
     private var observedProcessID: pid_t?
@@ -59,6 +64,10 @@ final class ActiveWindowTracker: NSObject {
     }
 
     func refresh() {
+        // Callers (space/screen observers, queued AX callbacks) can reach a
+        // stopped tracker; attaching observation then would leak it.
+        guard isRunning else { return }
+
         guard AXIsProcessTrusted() else {
             resetPrimaryState()
             statusMessage = Self.accessibilityAccessMessage
@@ -89,8 +98,9 @@ final class ActiveWindowTracker: NSObject {
                 queue: .main
             ) { [weak self] _ in
                 Task { @MainActor [weak self] in
-                    self?.attachToFrontmostApplication()
-                    self?.refreshFocusContext()
+                    // Via refresh() so its isRunning guard holds: a queued
+                    // notification task can land after stop().
+                    self?.refresh()
                 }
             }
         )
@@ -102,8 +112,7 @@ final class ActiveWindowTracker: NSObject {
                 queue: .main
             ) { [weak self] _ in
                 Task { @MainActor [weak self] in
-                    self?.attachToFrontmostApplication()
-                    self?.refreshFocusContext()
+                    self?.refresh()
                 }
             }
         )
@@ -115,10 +124,10 @@ final class ActiveWindowTracker: NSObject {
         workspaceObservers.removeAll()
     }
 
-    private func startFastPathDisplayLink() {
+    private func startFastPathDisplayLink(on preferredScreen: NSScreen? = nil) {
         guard fastPathDisplayLink == nil else { return }
 
-        guard let screen = NSScreen.main ?? NSScreen.screens.first else {
+        guard let screen = preferredScreen ?? NSScreen.main ?? NSScreen.screens.first else {
             trackerLog.warning("no NSScreen available to drive fast-path CADisplayLink")
             return
         }
@@ -126,11 +135,62 @@ final class ActiveWindowTracker: NSObject {
         let link = screen.displayLink(target: self, selector: #selector(handleDisplayLinkTick(_:)))
         link.add(to: .main, forMode: .common)
         fastPathDisplayLink = link
+        displayLinkScreenID = screen.trackerDisplayID
     }
 
     private func stopFastPathDisplayLink() {
         fastPathDisplayLink?.invalidate()
         fastPathDisplayLink = nil
+        displayLinkScreenID = nil
+    }
+
+    // The link exists to follow the cutout during motion; parenting already
+    // moves the panel. Resume on AX moved/resized, pause after a quarter
+    // second of stillness — the slow path carries the window-gone check while
+    // paused.
+    func noteWindowMotion() {
+        lastWindowMotionAt = CACurrentMediaTime()
+        fastPathDisplayLink?.isPaused = false
+    }
+
+    private func pauseDisplayLinkIfIdle() {
+        guard let link = fastPathDisplayLink, !link.isPaused,
+              CACurrentMediaTime() - lastWindowMotionAt > Self.fastPathIdleTimeout else {
+            return
+        }
+        link.isPaused = true
+    }
+
+    private func screenContaining(_ frame: CGRect) -> NSScreen? {
+        guard let best = NSScreen.screens.max(by: {
+            $0.frame.intersection(frame).area < $1.frame.intersection(frame).area
+        }), best.frame.intersects(frame) else {
+            return nil
+        }
+        return best
+    }
+
+    // Each screen refreshes at its own rate; keep the link on the screen the
+    // tracked window actually occupies. Retargets, never creates: a nil link
+    // means the tracker is stopped or has no screen, and neither is this
+    // function's business to change.
+    private func retargetDisplayLinkIfNeeded(for frame: CGRect) {
+        guard let link = fastPathDisplayLink, let screen = screenContaining(frame) else { return }
+        guard screen.trackerDisplayID != displayLinkScreenID else { return }
+
+        // Hysteresis: at a screen boundary the max-intersection pick flips on
+        // half a pixel of movement, and recreating a link per frame is worse
+        // than a briefly wrong cadence. Move only once the new screen clearly
+        // owns the window.
+        if let currentScreen = NSScreen.screens.first(where: { $0.trackerDisplayID == displayLinkScreenID }) {
+            let currentArea = currentScreen.frame.intersection(frame).area
+            guard screen.frame.intersection(frame).area > currentArea * 1.25 else { return }
+        }
+
+        let wasPaused = link.isPaused
+        stopFastPathDisplayLink()
+        startFastPathDisplayLink(on: screen)
+        fastPathDisplayLink?.isPaused = wasPaused
     }
 
     @objc private func handleDisplayLinkTick(_ sender: CADisplayLink) {
@@ -164,7 +224,7 @@ final class ActiveWindowTracker: NSObject {
         // start, e.g. launch-at-login before displays enumerate) — retry, and
         // never let the window-gone check depend on the link existing.
         if fastPathDisplayLink == nil {
-            startFastPathDisplayLink()
+            startFastPathDisplayLink(on: primaryWindowFrame.flatMap(screenContaining))
         }
 
         // NSWorkspace.didActivateApplicationNotification lands well after the
@@ -180,6 +240,8 @@ final class ActiveWindowTracker: NSObject {
         // Backstop for missed AX focus notifications (common when an app has
         // just launched and the observer attached before the focused window
         // existed). Retry the focus query so we self-heal within ~100 ms.
+        pauseDisplayLinkIfIdle()
+
         if primaryWindowFrame == nil, observedApplicationElement != nil {
             refreshFocusContext()
         } else {
@@ -190,6 +252,15 @@ final class ActiveWindowTracker: NSObject {
             // window-list scan does not run.
             if primaryWindowNumber == nil {
                 matchPrimaryWindowNumber()
+            }
+            // ~1 Hz focus self-heal: some toolkits post focused/main-window
+            // notifications unreliably, and moved/resized no longer implies a
+            // focus re-resolve. One AX round-trip per second catches a focus
+            // change every other signal missed.
+            slowTicksSinceFocusResolve += 1
+            if slowTicksSinceFocusResolve >= Self.slowTicksPerFocusResolve {
+                slowTicksSinceFocusResolve = 0
+                refreshFocusContext()
             }
             publishUpdate()
         }
@@ -211,6 +282,10 @@ final class ActiveWindowTracker: NSObject {
             let now = CACurrentMediaTime()
             guard let miss = boundsMiss, miss.windowNumber == windowNumber else {
                 boundsMiss = (windowNumber, now)
+                // Wake the fast path so the follow-up checks run at frame rate
+                // and the grace period is measured finely, not at 10 Hz.
+                fastPathDisplayLink?.isPaused = false
+                lastWindowMotionAt = now
                 return
             }
             if now - miss.since >= Self.missedBoundsGrace {
@@ -227,6 +302,8 @@ final class ActiveWindowTracker: NSObject {
         boundsMiss = nil
         guard primaryWindowFrame != observedBounds else { return }
         primaryWindowFrame = observedBounds
+        noteWindowMotion()
+        retargetDisplayLinkIfNeeded(for: observedBounds)
         publishUpdate()
     }
 
@@ -409,6 +486,8 @@ final class ActiveWindowTracker: NSObject {
                info.alpha > 0 {
                 primaryWindowNumber = Int(directWindowID)
                 primaryWindowFrame = info.bounds
+                noteWindowMotion()
+                retargetDisplayLinkIfNeeded(for: info.bounds)
             } else {
                 resetPrimaryState()
             }
@@ -589,12 +668,21 @@ final class ActiveWindowTracker: NSObject {
     }
 }
 
-private let axFocusChangeCallback: AXObserverCallback = { _, _, _, refcon in
+private let axFocusChangeCallback: AXObserverCallback = { _, _, notification, refcon in
     guard let refcon else { return }
     let tracker = Unmanaged<ActiveWindowTracker>.fromOpaque(refcon).takeUnretainedValue()
+    let isWindowMotion = notification as String == kAXWindowMovedNotification
+        || notification as String == kAXWindowResizedNotification
 
     Task { @MainActor in
-        tracker.refresh()
+        if isWindowMotion {
+            // Bounds follow via the display link; a full focus refresh per
+            // move notification would add an AX round-trip on every frame of
+            // a drag for nothing.
+            tracker.noteWindowMotion()
+        } else {
+            tracker.refresh()
+        }
     }
 }
 
@@ -602,6 +690,13 @@ private struct WindowSnapshot {
     let windowNumber: Int
     let ownerPID: pid_t
     let bounds: CGRect
+}
+
+private extension NSScreen {
+    var trackerDisplayID: CGDirectDisplayID? {
+        (deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)
+            .map { CGDirectDisplayID(truncating: $0) }
+    }
 }
 
 private extension CGRect {

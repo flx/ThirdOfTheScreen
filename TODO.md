@@ -28,21 +28,4 @@ of that date.
   lifetime per pid, teardown on terminate, re-attach on relaunch); do not
   build it speculatively.
 
-- [ ] (fast-path-display-link-duty-cycle) **[standard · Low]** While emphasis
-  is on, the `CADisplayLink` does one `CGWindowListCopyWindowInfo` IPC per
-  frame (120 Hz on ProMotion) even when nothing moves, and `slowPathTick`
-  copies the whole on-screen window list at 10 Hz
-  (`ActiveWindowTracker.swift:165-174`, `:378-406`). Parenting already moves
-  the panel; the fast path only serves the cutout — so run the link only
-  during an AX moved/resized burst (start on the notification, stop ~250 ms
-  after the last). Fold in F5: the link is created for `NSScreen.main` once at
-  start (`:113-124`) — wrong cadence on multi-display, never re-created on
-  screen changes. The slow-path scan disappears with
-  `(ax-element-to-window-id-drop-geometry-matcher)`. (Arch review F4/F5.)
-
-- [ ] (screen-change-skips-emphasis-overlay) **[trivial · Low]**
-  `didChangeScreenParametersNotification` only resynchronizes the grid panels
-  (`OverlayManager.swift:112-122`); the emphasis panel keeps its old frame
-  until the next focus change. Add `activeWindowTracker.refresh()` (and hence
-  a re-push) to that observer. (Arch review F6.)
 

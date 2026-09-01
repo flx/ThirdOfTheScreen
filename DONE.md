@@ -2,6 +2,27 @@
 
 Shipped items, newest first. Format: slug — date, commit, one-line record.
 
+- (fast-path-display-link-duty-cycle) — 2026-09-01, commit: see log. The
+  CADisplayLink now duty-cycles: AX moved/resized wake it (and no longer
+  trigger a full AX refresh per drag frame); the slow path pauses it 250 ms
+  after the last motion; a bounds-miss wakes it so window-gone grace is
+  measured at frame rate; it is created on / retargeted to the tracked
+  window's screen with 1.25× hysteresis. Idle cost drops from one CGWindowList
+  IPC per frame to one per 100 ms. A ~1 Hz slow-path focus re-resolve replaces
+  the self-heal that per-move refreshes used to provide. adv-review-edge
+  (combined with the screen-change item): 9 findings incl. one HIGH
+  (stopped-tracker link resurrection), all fixed pre-commit — disposition in
+  `plans/shipped/fast-path-display-link-duty-cycle.plan.md`.
+
+- (screen-change-skips-emphasis-overlay) — 2026-09-01, commit: see log.
+  `didChangeScreenParametersNotification` now re-resolves the tracker AND
+  re-pushes the emphasis unconditionally (the publish dedupe otherwise skips
+  the recompute when only screen geometry changed — review R3);
+  `ActiveWindowTracker.refresh()` gained an `isRunning` guard so space/screen
+  observers can no longer re-install AX observation on a stopped tracker
+  (pre-existing bug); `panelGeometry` picks the max-intersection screen,
+  matching the tracker (review R9).
+
 - (ax-element-to-window-id-drop-geometry-matcher) — 2026-09-01, commit: see
   log. Focused-window CGWindowID now comes from dlsym-resolved private
   `_AXUIElementGetWindow` (verified resolving at runtime); adoption is gated

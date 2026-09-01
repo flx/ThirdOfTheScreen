@@ -117,7 +117,14 @@ final class OverlayManager: ObservableObject {
                 queue: .main
             ) { [weak self] _ in
                 Task { @MainActor [weak self] in
-                    self?.gridOverlay.synchronizePanels()
+                    guard let self else { return }
+                    self.gridOverlay.synchronizePanels()
+                    // Re-resolve the active window AND re-push unconditionally:
+                    // when only the screen layout changed, the tracker publish
+                    // dedupes (same window, same frame), yet the panel frame is
+                    // derived from screen geometry and must be recomputed.
+                    self.activeWindowTracker.refresh()
+                    self.pushActiveWindowToEmphasis()
                 }
             }
         )
@@ -244,8 +251,10 @@ final class OverlayManager: ObservableObject {
     // focus) and clearing immediately would flicker the overlay. But it is
     // also what a closed window leaves behind, so hold only briefly: if no
     // primary re-appears within the deadline, take the emphasis down.
-    // 180 ms so that grace-period + hold stays under a quarter second on any
-    // display; long enough that menu/sheet focus transients don't flicker.
+    // Sized so the common teardown (AX destroyed notification -> nil publish
+    // -> this hold) stays around 200 ms, while menu/sheet focus transients
+    // don't flicker. The no-notification backstop path adds the tracker's
+    // detection latency on top (up to ~180 ms when the fast path was paused).
     private static let emphasisClearHold = Duration.milliseconds(180)
 
     private func scheduleEmphasisClearAfterHold() {

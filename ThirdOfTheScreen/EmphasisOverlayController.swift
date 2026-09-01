@@ -73,7 +73,13 @@ final class EmphasisOverlayController {
     }
 
     private func panelGeometry(for cocoaBounds: CGRect) -> (panelFrame: CGRect, cutout: CGRect) {
-        let screenFrame = (NSScreen.screens.first(where: { $0.frame.intersects(cocoaBounds) }) ?? NSScreen.main)?.frame
+        // Max-intersection, matching the tracker's screen pick — first-match
+        // could dim around the sliver screen of a straddling window and leave
+        // most of its real screen undimmed.
+        let bestScreen = NSScreen.screens
+            .max(by: { $0.frame.intersectionArea(with: cocoaBounds) < $1.frame.intersectionArea(with: cocoaBounds) })
+            .flatMap { $0.frame.intersects(cocoaBounds) ? $0 : nil }
+        let screenFrame = (bestScreen ?? NSScreen.main)?.frame
         if screenFrame == nil {
             emphasisLog.notice("no screen intersects active window bounds \(String(describing: cocoaBounds), privacy: .public); falling back to default screen size")
         }
@@ -105,6 +111,14 @@ final class EmphasisOverlayController {
         let panel = EmphasisPanel(tint: tintColor.withAlphaComponent(tintOpacity))
         self.panel = panel
         return panel
+    }
+}
+
+private extension CGRect {
+    func intersectionArea(with other: CGRect) -> CGFloat {
+        let intersection = intersection(other)
+        guard !intersection.isNull, !intersection.isEmpty else { return 0 }
+        return intersection.width * intersection.height
     }
 }
 
