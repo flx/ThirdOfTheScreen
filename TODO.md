@@ -13,19 +13,6 @@ of that date.
 
 ## 0. Next up — work these first, in this order
 
-- [ ] (cross-app-activation-latency) **[standard · High]** Cross-app focus
-  switches wait on `NSWorkspace.didActivateApplicationNotification`
-  (`ActiveWindowTracker.swift:80-91`), which lands well after the visual
-  switch; within-app switches are already immediate via AX. Two-step direction
-  (arch review F2): FIRST the cheap cap — add a frontmost-pid compare to the
-  existing 10 Hz `slowPathTick` and re-attach on mismatch (caps latency at
-  ~100 ms, a few lines). THEN, if still not fast enough, the AltTab/yabai
-  observer pool: one `AXObserver` per running app registered for
-  `kAXApplicationActivatedNotification` +
-  `kAXFocusedWindowChangedNotification`, maintained against app
-  launch/terminate notifications — sub-frame latency, documented APIs. The
-  private SLS notification route was considered and is NOT recommended first.
-
 - [ ] (ax-element-to-window-id-drop-geometry-matcher) **[standard · Medium]**
   Replace the AX→CGWindowID geometry-matching heuristic
   (`matchPrimaryWindowNumber` + `windowSnapshots` +
@@ -40,6 +27,18 @@ of that date.
   (Arch review F3.)
 
 ## 1. Filed, not scheduled
+
+- [ ] (ax-observer-pool-per-app) **[standard · TRIGGERED — do not schedule
+  until it fires]** Step 2 of `(cross-app-activation-latency)`, deliberately
+  not built with step 1: one `AXObserver` per running application registered
+  for `kAXApplicationActivatedNotification` +
+  `kAXFocusedWindowChangedNotification`, maintained against workspace
+  launch/terminate notifications (the AltTab/yabai pattern) — sub-frame
+  cross-app switch latency instead of the ~100 ms cap the slow-path pid
+  compare provides. **Trigger: Felix reports the capped latency still feels
+  slow on the running app.** The pool costs real bookkeeping (observer
+  lifetime per pid, teardown on terminate, re-attach on relaunch); do not
+  build it speculatively.
 
 - [ ] (fast-path-display-link-duty-cycle) **[standard · Low]** While emphasis
   is on, the `CADisplayLink` does one `CGWindowListCopyWindowInfo` IPC per

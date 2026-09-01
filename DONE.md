@@ -2,6 +2,15 @@
 
 Shipped items, newest first. Format: slug — date, commit, one-line record.
 
+- (cross-app-activation-latency) — 2026-09-01, commit: see log. Step 1 only:
+  the 10 Hz slow path now compares `NSWorkspace.frontmostApplication`'s pid
+  against the observed pid and re-attaches on mismatch, capping cross-app
+  emphasis latency at ~100 ms instead of
+  `didActivateApplicationNotification`'s lag. Step 2 (per-app AXObserver pool,
+  sub-frame latency) filed as `(ax-observer-pool-per-app)`, TRIGGERED on Felix
+  judging the cap still too slow. Code review ran combined with the matcher
+  item's diff (same function) — see that plan's disposition.
+
 - (emphasis-punchout-outlives-closed-window) — 2026-09-01, commit: see log.
   The reported Finder bug. Tracker now observes kAXUIElementDestroyed +
   kAXWindowMiniaturized on the window element and kAXApplicationHidden on the

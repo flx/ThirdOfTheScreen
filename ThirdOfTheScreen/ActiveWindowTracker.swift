@@ -153,6 +153,16 @@ final class ActiveWindowTracker: NSObject {
     }
 
     private func slowPathTick() {
+        // NSWorkspace.didActivateApplicationNotification lands well after the
+        // visual focus switch; this pid compare caps cross-app latency at one
+        // slow-path period instead of the notification's lag.
+        if let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier,
+           frontmostPID != observedProcessID {
+            attachToFrontmostApplication()
+            refreshFocusContext()
+            return
+        }
+
         // The display link can be missing for the whole session (no screen at
         // start, e.g. launch-at-login before displays enumerate) — retry, and
         // never let the window-gone check depend on the link existing.
