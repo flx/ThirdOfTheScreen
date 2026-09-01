@@ -78,10 +78,3 @@ of that date.
   until the next focus change. Add `activeWindowTracker.refresh()` (and hence
   a re-push) to that observer. (Arch review F6.)
 
-- [ ] (claude-md-architecture-stale) **[trivial · Low]** CLAUDE.md still
-  describes emphasis as `ScreenOverlayView` cutouts via
-  `blendMode(.destinationOut)` on per-display panels and names
-  `EmphasisStripsController`. Reality: single `EmphasisPanel`,
-  `CAShapeLayer` even-odd mask, parented to the active window through
-  `PrivateWindowServer` (`EmphasisOverlayController.swift`). Rewrite the
-  architecture section; doc-only. (Arch review F7.)
