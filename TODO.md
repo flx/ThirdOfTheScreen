@@ -13,18 +13,6 @@ of that date.
 
 ## 0. Next up — work these first, in this order
 
-- [ ] (ax-element-to-window-id-drop-geometry-matcher) **[standard · Medium]**
-  Replace the AX→CGWindowID geometry-matching heuristic
-  (`matchPrimaryWindowNumber` + `windowSnapshots` +
-  `bestMatchingPrimarySnapshot` + the ≥4 pt invalidation at
-  `ActiveWindowTracker.swift:311-313`) with the private
-  `_AXUIElementGetWindow(AXUIElement, &CGWindowID)`, dlsym-resolved with the
-  current matcher kept as fallback — the same pattern `PrivateWindowServer`
-  already uses. Retires a real mis-lock (`bestMatchingPrimarySnapshot` is
-  `snapshots.max` with NO minimum score, so it will lock onto a zero-overlap
-  window, `:420-428`) and deletes the 10 Hz full-window-list scan. Shrinks
-  both items above; do it before, not after, any deeper tracker rework.
-  (Arch review F3.)
 
 ## 1. Filed, not scheduled
 

@@ -21,6 +21,7 @@ final class ActiveWindowTracker: NSObject {
     private(set) var primaryWindowFrame: CGRect?
 
     private var workspaceObservers: [NSObjectProtocol] = []
+    private var isRunning = false
     private var boundsMiss: (windowNumber: Int, since: CFTimeInterval)?
     private var fastPathDisplayLink: CADisplayLink?
     private var slowPathTimer: Timer?
@@ -37,6 +38,7 @@ final class ActiveWindowTracker: NSObject {
             return false
         }
 
+        isRunning = true
         installWorkspaceObserversIfNeeded()
         startFastPathDisplayLink()
         startSlowPathTimer()
@@ -46,6 +48,7 @@ final class ActiveWindowTracker: NSObject {
     }
 
     func stop() {
+        isRunning = false
         removeWorkspaceObservers()
         stopFastPathDisplayLink()
         stopSlowPathTimer()
@@ -153,6 +156,17 @@ final class ActiveWindowTracker: NSObject {
     }
 
     private func slowPathTick() {
+        // A tick can be queued across stop(): the timer fires into a Task, so
+        // it may run after teardown and must not re-install observation.
+        guard isRunning else { return }
+
+        // The display link can be missing for the whole session (no screen at
+        // start, e.g. launch-at-login before displays enumerate) — retry, and
+        // never let the window-gone check depend on the link existing.
+        if fastPathDisplayLink == nil {
+            startFastPathDisplayLink()
+        }
+
         // NSWorkspace.didActivateApplicationNotification lands well after the
         // visual focus switch; this pid compare caps cross-app latency at one
         // slow-path period instead of the notification's lag.
@@ -163,13 +177,6 @@ final class ActiveWindowTracker: NSObject {
             return
         }
 
-        // The display link can be missing for the whole session (no screen at
-        // start, e.g. launch-at-login before displays enumerate) — retry, and
-        // never let the window-gone check depend on the link existing.
-        if fastPathDisplayLink == nil {
-            startFastPathDisplayLink()
-        }
-
         // Backstop for missed AX focus notifications (common when an app has
         // just launched and the observer attached before the focused window
         // existed). Retry the focus query so we self-heal within ~100 ms.
@@ -177,7 +184,13 @@ final class ActiveWindowTracker: NSObject {
             refreshFocusContext()
         } else {
             verifyPrimaryWindowPresence()
-            matchPrimaryWindowNumber()
+            // Retry geometry matching only while the number is unresolved —
+            // the case where _AXUIElementGetWindow failed for this element (or
+            // is gone entirely). While the number is resolved, the 10 Hz full
+            // window-list scan does not run.
+            if primaryWindowNumber == nil {
+                matchPrimaryWindowNumber()
+            }
             publishUpdate()
         }
     }
@@ -217,7 +230,24 @@ final class ActiveWindowTracker: NSObject {
         publishUpdate()
     }
 
+    private struct OnScreenWindowInfo {
+        let bounds: CGRect
+        let layer: Int
+        let alpha: Double
+    }
+
     private func fetchWindowBounds(windowNumber: Int) -> CGRect? {
+        fetchOnScreenWindowInfo(windowNumber: windowNumber)?.bounds
+    }
+
+    // Returns nil for any window not on the current Space's on-screen list —
+    // closed, minimized, hidden and other-Space windows are indistinguishable
+    // here, and all of them must read as "no longer present".
+    // No minimum-size floor: this call doubles as the liveness probe for the
+    // tracked window, and a live window dragged very small must not read as
+    // closed. The floor stays in windowSnapshots(), where it filters matcher
+    // candidates.
+    private func fetchOnScreenWindowInfo(windowNumber: Int) -> OnScreenWindowInfo? {
         guard let infoList = CGWindowListCopyWindowInfo(
             [.optionIncludingWindow],
             CGWindowID(windowNumber)
@@ -225,16 +255,16 @@ final class ActiveWindowTracker: NSObject {
             return nil
         }
 
-        // No minimum-size floor here: this call doubles as the liveness probe
-        // for the tracked window, and a live window dragged very small must
-        // not read as closed. The floor stays in windowSnapshots(), where it
-        // filters matcher candidates.
         guard let boundsDictionary = info[kCGWindowBounds as String] as? NSDictionary,
-              let windowServerBounds = CGRect(dictionaryRepresentation: boundsDictionary) else {
+              let windowServerBounds = CGRect(dictionaryRepresentation: boundsDictionary),
+              let cocoaBounds = convertFromWindowServerCoordinates(windowServerBounds) else {
             return nil
         }
 
-        return convertFromWindowServerCoordinates(windowServerBounds)
+        let layer = (info[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0
+        let alpha = (info[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1
+
+        return OnScreenWindowInfo(bounds: cocoaBounds, layer: layer, alpha: alpha)
     }
 
     private func attachToFrontmostApplication() {
@@ -368,12 +398,29 @@ final class ActiveWindowTracker: NSObject {
             return
         }
 
-        if let previousFrame = primaryWindowFrame, !previousFrame.nearlyEquals(cocoaFrame, tolerance: 4) {
-            primaryWindowNumber = nil
+        if let directWindowID = PrivateWindowServer.windowID(forAXElement: focusedWindowElement) {
+            // AX is Space-agnostic: it keeps reporting a focused window that is
+            // minimized, hidden or on another Space, and re-adopting one here
+            // would livelock the window-gone teardown. Adopt only a window
+            // that is actually on the current on-screen list, in the normal
+            // layer and visible — the same filters the matcher path applies.
+            if let info = fetchOnScreenWindowInfo(windowNumber: Int(directWindowID)),
+               info.layer == 0,
+               info.alpha > 0 {
+                primaryWindowNumber = Int(directWindowID)
+                primaryWindowFrame = info.bounds
+            } else {
+                resetPrimaryState()
+            }
+        } else {
+            // Fallback when _AXUIElementGetWindow is unavailable: match the AX
+            // frame against on-screen window snapshots by geometry.
+            if let previousFrame = primaryWindowFrame, !previousFrame.nearlyEquals(cocoaFrame, tolerance: 4) {
+                primaryWindowNumber = nil
+            }
+            primaryWindowFrame = cocoaFrame
+            matchPrimaryWindowNumber()
         }
-        primaryWindowFrame = cocoaFrame
-
-        matchPrimaryWindowNumber()
         updateStatus(nil)
     }
 

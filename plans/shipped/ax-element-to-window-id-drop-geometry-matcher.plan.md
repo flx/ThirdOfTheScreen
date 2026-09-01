@@ -30,6 +30,36 @@ Evidence: `arch-reviews/2026-09-01-active-window-tracking.md` F3.
   fast path; cross-app changes are covered by AX + the frontmost-pid check
   from `(cross-app-activation-latency)`.
 
+## Review round (adv-review-behavior, 2026-09-01, combined with cross-app-activation-latency) and disposition
+
+6 findings. The reviewer probed on this machine: `.optionIncludingWindow`
+returns 0 records for every window absent from the current Space's on-screen
+list (129/129), and `_AXUIElementGetWindow` returns `kAXErrorCannotComplete`
+for unservable elements.
+
+- R1 CRITICAL (window-gone teardown livelocks: AX is Space-agnostic, so the
+  direct path re-adopted a minimized/other-Space window right after gone-fired;
+  publish deduped; emphasis stayed up forever — regressed item 1 for Space
+  switches and Electron-style minimize) — ACCEPTED, verified against my own
+  code. Fix: adoption now requires `fetchOnScreenWindowInfo` to return a
+  record.
+- R2 HIGH (direct path dropped the matcher's layer==0 / alpha>0 filters —
+  would adopt Spotlight's window) — ACCEPTED. Same fix carries the filters.
+  The 4 pt floor is deliberately NOT re-applied to adoption, consistent with
+  the round-1 F5 decision.
+- R3 LOW (pid branch skipped display-link self-heal) — ACCEPTED, reordered.
+- R4 LOW (tick queued across stop() re-attaches observation) — ACCEPTED,
+  `isRunning` guard; also covers the display-link-restart sibling from item 1.
+- R5 NIT (first publish carried AX frame) — ACCEPTED via R1's fix (adoption
+  publishes the CG bounds).
+- R6 NIT (comment overclaimed "never entered") — ACCEPTED, reworded; the
+  per-call fallback and its retry loop are now stated accurately.
+- Clean per reviewer: own-panel adoption impossible (self-pid guard),
+  fallback semantics verbatim, no dead code, item A does not fight the
+  notification path, ABI of the thunk sane.
+- Re-review SKIPPED, deliberately: fixes implement the findings' own remedies;
+  the adoption filter reuses exactly the predicate the old matcher applied.
+
 ## Decisions taken
 
 - 2026-09-01: fallback keeps the OLD matcher semantics (including its
