@@ -12,17 +12,19 @@
 		3F446AABE4E6A4875D01386E /* PrivateWindowServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3A77E3E563BB8F691C4D1FD /* PrivateWindowServer.swift */; };
 		4507D85DF5556ACB11DA7869 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 43C4E3B533118CE7CC7E3B98 /* Assets.xcassets */; };
 		4B56EDA379D3BA0B8E24DCE5 /* ScreenOverlayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAA0B669513CF9ECCF3593CD /* ScreenOverlayView.swift */; };
+		763100738EC99072D7DF830B /* GridOverlayController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B27E5C5549391B123B630AC7 /* GridOverlayController.swift */; };
 		808DDD8C394B3DE798534EA0 /* ThirdOfTheScreenApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B77DC10A5BC9ED4AC809B248 /* ThirdOfTheScreenApp.swift */; };
 		8AD4184362E5CC3ED0942C43 /* LaunchAtLoginManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1C8D22186D75C416AC06AF7 /* LaunchAtLoginManager.swift */; };
-		C9C1E913D6FECA256863CAE5 /* EmphasisStripsController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F76AC4CA5A0FD2927F3F210 /* EmphasisStripsController.swift */; };
+		DC44F188153AACCF984C54D8 /* EmphasisOverlayController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C8983815996630067CAEF27 /* EmphasisOverlayController.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		0F76AC4CA5A0FD2927F3F210 /* EmphasisStripsController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmphasisStripsController.swift; sourceTree = "<group>"; };
 		27FB0160A36D9E6BEF3A9655 /* ActiveWindowTracker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActiveWindowTracker.swift; sourceTree = "<group>"; };
 		43C4E3B533118CE7CC7E3B98 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		5C8983815996630067CAEF27 /* EmphasisOverlayController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmphasisOverlayController.swift; sourceTree = "<group>"; };
 		5ED1F46869D4559A02719D15 /* OverlayManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OverlayManager.swift; sourceTree = "<group>"; };
 		B1B4478FF454BDE4B2DB015F /* ThirdOfTheScreen.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ThirdOfTheScreen.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B27E5C5549391B123B630AC7 /* GridOverlayController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GridOverlayController.swift; sourceTree = "<group>"; };
 		B77DC10A5BC9ED4AC809B248 /* ThirdOfTheScreenApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThirdOfTheScreenApp.swift; sourceTree = "<group>"; };
 		D3A77E3E563BB8F691C4D1FD /* PrivateWindowServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrivateWindowServer.swift; sourceTree = "<group>"; };
 		DAA0B669513CF9ECCF3593CD /* ScreenOverlayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenOverlayView.swift; sourceTree = "<group>"; };
@@ -51,7 +53,8 @@
 			children = (
 				27FB0160A36D9E6BEF3A9655 /* ActiveWindowTracker.swift */,
 				43C4E3B533118CE7CC7E3B98 /* Assets.xcassets */,
-				0F76AC4CA5A0FD2927F3F210 /* EmphasisStripsController.swift */,
+				5C8983815996630067CAEF27 /* EmphasisOverlayController.swift */,
+				B27E5C5549391B123B630AC7 /* GridOverlayController.swift */,
 				E1C8D22186D75C416AC06AF7 /* LaunchAtLoginManager.swift */,
 				5ED1F46869D4559A02719D15 /* OverlayManager.swift */,
 				D3A77E3E563BB8F691C4D1FD /* PrivateWindowServer.swift */,
@@ -132,7 +135,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				0E738E549A6FA16DBA7EBB8E /* ActiveWindowTracker.swift in Sources */,
-				C9C1E913D6FECA256863CAE5 /* EmphasisStripsController.swift in Sources */,
+				DC44F188153AACCF984C54D8 /* EmphasisOverlayController.swift in Sources */,
+				763100738EC99072D7DF830B /* GridOverlayController.swift in Sources */,
 				8AD4184362E5CC3ED0942C43 /* LaunchAtLoginManager.swift in Sources */,
 				05B3633F2E5E2CD627CF28F6 /* OverlayManager.swift in Sources */,
 				3F446AABE4E6A4875D01386E /* PrivateWindowServer.swift in Sources */,

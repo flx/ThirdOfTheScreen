@@ -1,73 +1,42 @@
 import AppKit
 import ApplicationServices
 import Foundation
+import OSLog
 import QuartzCore
 
-struct WindowCutout: Equatable {
-    let frame: CGRect
-    let cornerRadius: CGFloat
-}
+private let trackerLog = Logger(subsystem: "com.felix.thirdofthescreen", category: "ActiveWindow")
 
 @MainActor
 final class ActiveWindowTracker: NSObject {
     private static let accessibilityAccessMessage =
         "Allow Accessibility access in System Settings > Privacy & Security > Accessibility. If it is already enabled, remove and re-add Third Of The Screen."
-    private static let fastPathRefreshInterval = 1.0 / 120.0
     private static let slowPathRefreshInterval = 1.0 / 10.0
-    private static let menuBarAttachmentTolerance: CGFloat = 48
-    private static let focusedElementSearchDepth = 16
-    private static let preferredTransientRoles: Set<String> = [
-        kAXMenuRole as String,
-        "AXPopover",
-        kAXSheetRole as String,
-        "AXDialog",
-        kAXWindowRole as String
-    ]
 
-    private static let standardCornerRadius: CGFloat = {
-        ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26 ? 16 : 10
-    }()
-
-    private static let panelCornerRadius: CGFloat = {
-        ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26 ? 15 : 10
-    }()
-
-    var onUpdate: (([WindowCutout], String?) -> Void)?
+    var onUpdate: ((String?) -> Void)?
     var excludedWindowNumbersProvider: (() -> Set<Int>)?
 
-    private(set) var highlightedWindowCutouts: [WindowCutout] = []
     private(set) var statusMessage: String?
-
-    var primaryWindowNumber: Int? { trackedPrimaryWindowNumber }
-    var primaryWindowFrame: CGRect? { trackedPrimaryWindowFrame }
+    private(set) var primaryWindowNumber: Int?
+    private(set) var primaryWindowFrame: CGRect?
 
     private var workspaceObservers: [NSObjectProtocol] = []
     private var fastPathDisplayLink: CADisplayLink?
-    private var fastPathFallbackTimer: Timer?
     private var slowPathTimer: Timer?
     private var observedProcessID: pid_t?
     private var observedApplicationElement: AXUIElement?
     private var observedWindowElement: AXUIElement?
     private var observer: AXObserver?
-    private var trackedPrimaryWindowFrame: CGRect?
-    private var trackedPrimaryWindowNumber: Int?
-    private var cachedPrimaryCutout: WindowCutout?
-    private var cachedAuxiliaryCutouts: [WindowCutout] = []
-    private var cachedAuxiliaryWindows: [(windowNumber: Int, cornerRadius: CGFloat)] = []
-    private var cachedTransientCutouts: [WindowCutout] = []
-    private var cachedStatusMessage: String?
 
     func start(promptForAccess: Bool) -> Bool {
         guard isAccessibilityTrusted(prompt: promptForAccess) else {
-            highlightedWindowCutouts = []
-            trackedPrimaryWindowFrame = nil
+            resetPrimaryState()
             statusMessage = Self.accessibilityAccessMessage
             publishUpdate()
             return false
         }
 
         installWorkspaceObserversIfNeeded()
-        startFastPathTimer()
+        startFastPathDisplayLink()
         startSlowPathTimer()
         attachToFrontmostApplication()
         refreshFocusContext()
@@ -76,26 +45,17 @@ final class ActiveWindowTracker: NSObject {
 
     func stop() {
         removeWorkspaceObservers()
-        stopFastPathTimer()
+        stopFastPathDisplayLink()
         stopSlowPathTimer()
         tearDownAccessibilityObservation()
-        highlightedWindowCutouts = []
-        trackedPrimaryWindowFrame = nil
-        trackedPrimaryWindowNumber = nil
-        cachedPrimaryCutout = nil
-        cachedAuxiliaryCutouts = []
-        cachedAuxiliaryWindows = []
-        cachedTransientCutouts = []
-        cachedStatusMessage = nil
+        resetPrimaryState()
         statusMessage = nil
         publishUpdate()
     }
 
     func refresh() {
         guard AXIsProcessTrusted() else {
-            highlightedWindowCutouts = []
-            trackedPrimaryWindowFrame = nil
-            trackedPrimaryWindowNumber = nil
+            resetPrimaryState()
             statusMessage = Self.accessibilityAccessMessage
             publishUpdate()
             return
@@ -150,34 +110,22 @@ final class ActiveWindowTracker: NSObject {
         workspaceObservers.removeAll()
     }
 
-    private func startFastPathTimer() {
-        // Drive the fast path from both a display-synced CADisplayLink *and* a 120 Hz
-        // timer. The display link is ideal when it fires; the timer is a safety net in
-        // case the vsync callback is missed (e.g. in some Space transitions). Duplicate
-        // ticks are cheap because fastPathTick() bails when nothing has moved.
-        if fastPathDisplayLink == nil, let screen = NSScreen.main ?? NSScreen.screens.first {
-            let link = screen.displayLink(target: self, selector: #selector(handleDisplayLinkTick(_:)))
-            link.add(to: .main, forMode: .common)
-            fastPathDisplayLink = link
+    private func startFastPathDisplayLink() {
+        guard fastPathDisplayLink == nil else { return }
+
+        guard let screen = NSScreen.main ?? NSScreen.screens.first else {
+            trackerLog.warning("no NSScreen available to drive fast-path CADisplayLink")
+            return
         }
 
-        if fastPathFallbackTimer == nil {
-            let timer = Timer(timeInterval: Self.fastPathRefreshInterval, repeats: true) { [weak self] _ in
-                Task { @MainActor [weak self] in
-                    self?.fastPathTick()
-                }
-            }
-            timer.tolerance = 0
-            RunLoop.main.add(timer, forMode: .common)
-            fastPathFallbackTimer = timer
-        }
+        let link = screen.displayLink(target: self, selector: #selector(handleDisplayLinkTick(_:)))
+        link.add(to: .main, forMode: .common)
+        fastPathDisplayLink = link
     }
 
-    private func stopFastPathTimer() {
+    private func stopFastPathDisplayLink() {
         fastPathDisplayLink?.invalidate()
         fastPathDisplayLink = nil
-        fastPathFallbackTimer?.invalidate()
-        fastPathFallbackTimer = nil
     }
 
     @objc private func handleDisplayLinkTick(_ sender: CADisplayLink) {
@@ -187,9 +135,6 @@ final class ActiveWindowTracker: NSObject {
     private func startSlowPathTimer() {
         guard slowPathTimer == nil else { return }
 
-        // Slow path: backstop for the AX-driven focus refresh. Runs the full snapshot +
-        // transient-resolution pass at a low rate so focused/transient UI stays in sync
-        // even if AX notifications are missed.
         let timer = Timer(timeInterval: Self.slowPathRefreshInterval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.slowPathTick()
@@ -200,79 +145,49 @@ final class ActiveWindowTracker: NSObject {
         slowPathTimer = timer
     }
 
-    private func slowPathTick() {
-        // If we have an AX observer attached to an app but no primary window
-        // locked in yet, the AX focus notification probably fired before we
-        // installed the observer (common when a brand-new app or window just
-        // launched). Retry the focus query so we self-heal within ~100 ms
-        // without the user needing to alt-tab away and back.
-        if trackedPrimaryWindowFrame == nil, observedApplicationElement != nil {
-            refreshFocusContext()
-        } else {
-            refreshTrackedWindowFrames()
-        }
-    }
-
     private func stopSlowPathTimer() {
         slowPathTimer?.invalidate()
         slowPathTimer = nil
     }
 
+    private func slowPathTick() {
+        // Backstop for missed AX focus notifications (common when an app has
+        // just launched and the observer attached before the focused window
+        // existed). Retry the focus query so we self-heal within ~100 ms.
+        if primaryWindowFrame == nil, observedApplicationElement != nil {
+            refreshFocusContext()
+        } else {
+            matchPrimaryWindowNumber()
+            publishUpdate()
+        }
+    }
+
     private func fastPathTick() {
-        guard let windowNumber = trackedPrimaryWindowNumber else { return }
-        guard let observedBounds = fetchWindowBounds(windowNumber: windowNumber) else { return }
-
-        let cornerRadius = cachedPrimaryCutout?.cornerRadius ?? Self.standardCornerRadius
-        let updatedPrimary = WindowCutout(frame: observedBounds, cornerRadius: cornerRadius)
-
-        let refreshedAuxiliary = cachedAuxiliaryWindows.compactMap { entry -> WindowCutout? in
-            guard let auxBounds = fetchWindowBounds(windowNumber: entry.windowNumber) else { return nil }
-            return WindowCutout(frame: auxBounds, cornerRadius: entry.cornerRadius)
+        guard let windowNumber = primaryWindowNumber,
+              let observedBounds = fetchWindowBounds(windowNumber: windowNumber) else {
+            return
         }
 
-        let primaryUnchanged = cachedPrimaryCutout == updatedPrimary
-        let auxiliaryUnchanged = refreshedAuxiliary == cachedAuxiliaryCutouts
-        if primaryUnchanged && auxiliaryUnchanged { return }
-
-        cachedPrimaryCutout = updatedPrimary
-        cachedAuxiliaryCutouts = refreshedAuxiliary
-        trackedPrimaryWindowFrame = observedBounds
-        commitCachedCutouts()
+        guard primaryWindowFrame != observedBounds else { return }
+        primaryWindowFrame = observedBounds
+        publishUpdate()
     }
 
     private func fetchWindowBounds(windowNumber: Int) -> CGRect? {
         guard let infoList = CGWindowListCopyWindowInfo(
             [.optionIncludingWindow],
             CGWindowID(windowNumber)
-        ) as? [[String: Any]],
-            let info = infoList.first,
-            let boundsDictionary = info[kCGWindowBounds as String] as? NSDictionary,
-            let windowServerBounds = CGRect(dictionaryRepresentation: boundsDictionary),
-            let cocoaBounds = convertFromWindowServerCoordinates(windowServerBounds),
-            cocoaBounds.width >= 4,
-            cocoaBounds.height >= 4
-        else {
+        ) as? [[String: Any]], let info = infoList.first else {
             return nil
         }
 
-        return cocoaBounds
-    }
-
-    private func commitCachedCutouts() {
-        var cutouts: [WindowCutout] = []
-        if let cachedPrimaryCutout {
-            cutouts.append(cachedPrimaryCutout)
-        }
-        cutouts.append(contentsOf: cachedAuxiliaryCutouts)
-        cutouts.append(contentsOf: cachedTransientCutouts)
-        updateState(cutouts: deduplicatedCutouts(cutouts), statusMessage: cachedStatusMessage)
+        return cocoaBounds(fromWindowInfo: info)
     }
 
     private func attachToFrontmostApplication() {
         guard let app = NSWorkspace.shared.frontmostApplication else {
             tearDownAccessibilityObservation()
-            trackedPrimaryWindowFrame = nil
-            trackedPrimaryWindowNumber = nil
+            resetPrimaryState()
             return
         }
 
@@ -280,21 +195,23 @@ final class ActiveWindowTracker: NSObject {
         guard processID != observedProcessID else { return }
 
         tearDownAccessibilityObservation()
-        trackedPrimaryWindowFrame = nil
-        trackedPrimaryWindowNumber = nil
+        resetPrimaryState()
 
         observedProcessID = processID
         observedApplicationElement = AXUIElementCreateApplication(processID)
 
         var observer: AXObserver?
-        let result = AXObserverCreate(processID, activeWindowObserverCallback, &observer)
-        if result == .success, let observer {
-            self.observer = observer
-            CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
-            addApplicationNotification(kAXFocusedWindowChangedNotification as CFString)
-            addApplicationNotification(kAXMainWindowChangedNotification as CFString)
-            addApplicationNotification(kAXApplicationActivatedNotification as CFString)
+        let result = AXObserverCreate(processID, axFocusChangeCallback, &observer)
+        guard result == .success, let observer else {
+            trackerLog.error("AXObserverCreate failed for pid \(processID, privacy: .public): \(String(describing: result), privacy: .public)")
+            return
         }
+
+        self.observer = observer
+        CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
+        addApplicationNotification(kAXFocusedWindowChangedNotification as CFString)
+        addApplicationNotification(kAXMainWindowChangedNotification as CFString)
+        addApplicationNotification(kAXApplicationActivatedNotification as CFString)
     }
 
     private func tearDownAccessibilityObservation() {
@@ -318,12 +235,15 @@ final class ActiveWindowTracker: NSObject {
 
     private func addApplicationNotification(_ notification: CFString) {
         guard let observer, let applicationElement = observedApplicationElement else { return }
-        _ = AXObserverAddNotification(
+        let result = AXObserverAddNotification(
             observer,
             applicationElement,
             notification,
             Unmanaged.passUnretained(self).toOpaque()
         )
+        if result != .success {
+            trackerLog.notice("AXObserverAddNotification \(notification as String, privacy: .public) failed: \(String(describing: result), privacy: .public)")
+        }
     }
 
     private func updateWindowObservationIfNeeded(with windowElement: AXUIElement) {
@@ -343,40 +263,39 @@ final class ActiveWindowTracker: NSObject {
 
         observedWindowElement = windowElement
 
-        _ = AXObserverAddNotification(
+        let movedResult = AXObserverAddNotification(
             observer,
             windowElement,
             kAXWindowMovedNotification as CFString,
             Unmanaged.passUnretained(self).toOpaque()
         )
-        _ = AXObserverAddNotification(
+        let resizedResult = AXObserverAddNotification(
             observer,
             windowElement,
             kAXWindowResizedNotification as CFString,
             Unmanaged.passUnretained(self).toOpaque()
         )
+        if movedResult != .success || resizedResult != .success {
+            trackerLog.notice("AXObserverAddNotification window moved/resized failed (moved=\(String(describing: movedResult), privacy: .public), resized=\(String(describing: resizedResult), privacy: .public))")
+        }
     }
 
     private func refreshFocusContext() {
-        guard let observedApplicationElement, let processID = observedProcessID else {
-            trackedPrimaryWindowFrame = nil
-            trackedPrimaryWindowNumber = nil
-            refreshTrackedWindowFrames()
+        guard let applicationElement = observedApplicationElement, let processID = observedProcessID else {
+            resetPrimaryState()
+            updateStatus(nil)
             return
         }
 
-        let ownProcessID = ProcessInfo.processInfo.processIdentifier
-        if processID == ownProcessID {
-            trackedPrimaryWindowFrame = nil
-            trackedPrimaryWindowNumber = nil
-            refreshTrackedWindowFrames(statusMessageWhenUnavailable: nil)
+        if processID == ProcessInfo.processInfo.processIdentifier {
+            resetPrimaryState()
+            updateStatus(nil)
             return
         }
 
-        guard let focusedWindowElement = focusedWindowElement(from: observedApplicationElement) else {
-            trackedPrimaryWindowFrame = nil
-            trackedPrimaryWindowNumber = nil
-            refreshTrackedWindowFrames(statusMessageWhenUnavailable: "Active window unavailable.")
+        guard let focusedWindowElement = focusedWindowElement(from: applicationElement) else {
+            resetPrimaryState()
+            updateStatus("Active window unavailable.")
             return
         }
 
@@ -384,91 +303,35 @@ final class ActiveWindowTracker: NSObject {
 
         guard let axFrame = axFrame(for: focusedWindowElement),
               let cocoaFrame = convertFromWindowServerCoordinates(axFrame) else {
-            trackedPrimaryWindowFrame = nil
-            trackedPrimaryWindowNumber = nil
-            refreshTrackedWindowFrames(statusMessageWhenUnavailable: "Active window unavailable.")
+            resetPrimaryState()
+            updateStatus("Active window unavailable.")
             return
         }
 
-        if let previousFrame = trackedPrimaryWindowFrame, !previousFrame.nearlyEquals(cocoaFrame, tolerance: 4) {
-            trackedPrimaryWindowNumber = nil
+        if let previousFrame = primaryWindowFrame, !previousFrame.nearlyEquals(cocoaFrame, tolerance: 4) {
+            primaryWindowNumber = nil
         }
-        trackedPrimaryWindowFrame = cocoaFrame
-        refreshTrackedWindowFrames()
+        primaryWindowFrame = cocoaFrame
+
+        matchPrimaryWindowNumber()
+        updateStatus(nil)
     }
 
-    private func refreshTrackedWindowFrames(statusMessageWhenUnavailable: String? = nil) {
-        let allWindowSnapshots = windowSnapshots()
-        let focusedTransientCutouts = focusedTransientCutouts(from: allWindowSnapshots)
-        let transientCutouts = focusedTransientCutouts.isEmpty
-            ? menuBarTransientCutouts(from: allWindowSnapshots)
-            : focusedTransientCutouts
-
-        cachedTransientCutouts = transientCutouts
-
-        guard let processID = observedProcessID else {
-            trackedPrimaryWindowFrame = nil
-            trackedPrimaryWindowNumber = nil
-            cachedPrimaryCutout = nil
-            cachedAuxiliaryCutouts = []
-            cachedAuxiliaryWindows = []
-            cachedStatusMessage = transientCutouts.isEmpty ? statusMessageWhenUnavailable : nil
-            commitCachedCutouts()
+    private func matchPrimaryWindowNumber() {
+        guard let processID = observedProcessID,
+              processID != ProcessInfo.processInfo.processIdentifier,
+              let referenceFrame = primaryWindowFrame else {
             return
         }
 
-        let ownProcessID = ProcessInfo.processInfo.processIdentifier
-        if processID == ownProcessID {
-            trackedPrimaryWindowFrame = nil
-            trackedPrimaryWindowNumber = nil
-            cachedPrimaryCutout = nil
-            cachedAuxiliaryCutouts = []
-            cachedAuxiliaryWindows = []
-            cachedStatusMessage = transientCutouts.isEmpty ? statusMessageWhenUnavailable : nil
-            commitCachedCutouts()
+        let appSnapshots = windowSnapshots().filter { $0.ownerPID == processID }
+
+        guard let primarySnapshot = bestMatchingPrimarySnapshot(from: appSnapshots, near: referenceFrame) else {
             return
         }
 
-        guard let referenceFrame = trackedPrimaryWindowFrame else {
-            cachedPrimaryCutout = nil
-            cachedAuxiliaryCutouts = []
-            cachedAuxiliaryWindows = []
-            cachedStatusMessage = transientCutouts.isEmpty ? "Active window unavailable." : nil
-            commitCachedCutouts()
-            return
-        }
-
-        let appSnapshots = allWindowSnapshots.filter { $0.ownerPID == processID }
-
-        let primarySnapshot = bestMatchingPrimarySnapshot(
-            from: appSnapshots,
-            near: referenceFrame
-        )
-
-        let primaryCutout: WindowCutout
-        if let primarySnapshot {
-            primaryCutout = WindowCutout(
-                frame: primarySnapshot.bounds,
-                cornerRadius: Self.cornerRadius(forLayer: primarySnapshot.layer)
-            )
-            trackedPrimaryWindowNumber = primarySnapshot.windowNumber
-        } else {
-            primaryCutout = WindowCutout(frame: referenceFrame, cornerRadius: Self.standardCornerRadius)
-        }
-
-        trackedPrimaryWindowFrame = primaryCutout.frame
-        cachedPrimaryCutout = primaryCutout
-        cachedAuxiliaryCutouts = auxiliaryCutouts(
-            from: appSnapshots,
-            excludingPrimaryFrame: primaryCutout.frame
-        )
-        cachedAuxiliaryWindows = auxiliaryWindows(
-            from: appSnapshots,
-            excludingPrimaryFrame: primaryCutout.frame
-        )
-        cachedStatusMessage = nil
-
-        commitCachedCutouts()
+        primaryWindowNumber = primarySnapshot.windowNumber
+        primaryWindowFrame = primarySnapshot.bounds
     }
 
     private func focusedWindowElement(from applicationElement: AXUIElement) -> AXUIElement? {
@@ -529,237 +392,39 @@ final class ActiveWindowTracker: NSObject {
                   let alpha = (info[kCGWindowAlpha as String] as? NSNumber)?.doubleValue,
                   alpha > 0,
                   let layer = (info[kCGWindowLayer as String] as? NSNumber)?.intValue,
-                  let boundsDictionary = info[kCGWindowBounds as String] as? NSDictionary,
-                  let windowServerBounds = CGRect(dictionaryRepresentation: boundsDictionary),
-                  let cocoaBounds = convertFromWindowServerCoordinates(windowServerBounds),
-                  cocoaBounds.width >= 4,
-                  cocoaBounds.height >= 4 else {
+                  layer == 0,
+                  let cocoaBounds = cocoaBounds(fromWindowInfo: info) else {
                 return nil
             }
 
             return WindowSnapshot(
                 windowNumber: windowNumber,
                 ownerPID: ownerPID,
-                bounds: cocoaBounds,
-                layer: layer
+                bounds: cocoaBounds
             )
         }
     }
 
-    private func menuBarTransientCutouts(from snapshots: [WindowSnapshot]) -> [WindowCutout] {
-        let candidates = snapshots
-            .filter { $0.layer > 0 }
-            .filter { isMenuBarTransientFrame($0.bounds) }
-
-        let survivingFrames = candidates.map(\.bounds).removingContainerFrames()
-
-        return candidates
-            .filter { snapshot in survivingFrames.contains { $0.nearlyEquals(snapshot.bounds) } }
-            .map { WindowCutout(frame: $0.bounds, cornerRadius: Self.cornerRadius(forLayer: $0.layer)) }
-    }
-
-    private func isMenuBarTransientFrame(_ frame: CGRect) -> Bool {
-        guard frame.width >= 40,
-              frame.height >= 40,
-              let screen = bestMatchingScreen(for: frame) else {
-            return false
-        }
-
-        let visibleFrame = screen.visibleFrame
-        let topDistance = abs(frame.maxY - visibleFrame.maxY)
-
-        return topDistance <= Self.menuBarAttachmentTolerance &&
-            frame.width <= visibleFrame.width * 0.9 &&
-            frame.height <= visibleFrame.height * 0.95
-    }
-
-    private func focusedTransientCutouts(from snapshots: [WindowSnapshot]) -> [WindowCutout] {
-        let systemWideElement = AXUIElementCreateSystemWide()
-
-        guard let focusedElement: AXUIElement = copyAttributeValue(
-            from: systemWideElement,
-            attribute: kAXFocusedUIElementAttribute as CFString
-        ) else {
-            return []
-        }
-
-        var collectedCandidates: [AXFrameCandidate] = []
-
-        if let windowElement: AXUIElement = copyAttributeValue(from: focusedElement, attribute: kAXWindowAttribute as CFString),
-           let candidate = frameCandidate(for: windowElement) {
-            collectedCandidates.append(candidate)
-        }
-
-        var currentElement: AXUIElement? = focusedElement
-        var inspectedElements: [AXUIElement] = []
-        var depth = 0
-
-        while depth < Self.focusedElementSearchDepth, let element = currentElement {
-            if inspectedElements.contains(where: { CFEqual($0, element) }) {
-                break
-            }
-
-            inspectedElements.append(element)
-
-            if let candidate = frameCandidate(for: element) {
-                collectedCandidates.append(candidate)
-            }
-
-            let parentElement: AXUIElement? = copyAttributeValue(from: element, attribute: kAXParentAttribute as CFString)
-            currentElement = parentElement
-            depth += 1
-        }
-
-        let filteredCandidates = normalizedTransientCandidates(collectedCandidates)
-
-        let prioritizedCandidates = filteredCandidates.sorted { lhs, rhs in
-            let lhsPriority = transientRolePriority(for: lhs.role)
-            let rhsPriority = transientRolePriority(for: rhs.role)
-
-            if lhsPriority != rhsPriority {
-                return lhsPriority < rhsPriority
-            }
-
-            return lhs.frame.area < rhs.frame.area
-        }
-
-        if let preferredCandidate = prioritizedCandidates.first(where: { candidate in
-            guard let role = candidate.role else { return false }
-            return Self.preferredTransientRoles.contains(role)
-        }) {
-            let frame = refinedTransientFrame(for: preferredCandidate.frame, using: snapshots)
-            return [WindowCutout(frame: frame, cornerRadius: Self.panelCornerRadius)]
-        }
-
-        if let bestCandidate = prioritizedCandidates.first {
-            let frame = refinedTransientFrame(for: bestCandidate.frame, using: snapshots)
-            return [WindowCutout(frame: frame, cornerRadius: Self.panelCornerRadius)]
-        }
-
-        return []
-    }
-
-    private func frameCandidate(for element: AXUIElement) -> AXFrameCandidate? {
-        guard let axFrame = axFrame(for: element),
-              let cocoaFrame = convertFromWindowServerCoordinates(axFrame),
-              cocoaFrame.width >= 40,
-              cocoaFrame.height >= 40 else {
+    private func cocoaBounds(fromWindowInfo info: [String: Any]) -> CGRect? {
+        guard let boundsDictionary = info[kCGWindowBounds as String] as? NSDictionary,
+              let windowServerBounds = CGRect(dictionaryRepresentation: boundsDictionary),
+              let cocoaBounds = convertFromWindowServerCoordinates(windowServerBounds),
+              cocoaBounds.width >= 4,
+              cocoaBounds.height >= 4 else {
             return nil
         }
 
-        let role: String? = copyAttributeValue(from: element, attribute: kAXRoleAttribute as CFString)
-        return AXFrameCandidate(frame: cocoaFrame, role: role)
-    }
-
-    private func isReasonableTransientCandidateFrame(_ frame: CGRect) -> Bool {
-        guard let screen = bestMatchingScreen(for: frame) else { return false }
-
-        let visibleFrame = screen.visibleFrame
-        let relativeArea = frame.area / visibleFrame.area
-
-        return frame.width <= visibleFrame.width * 0.9 &&
-            frame.height <= visibleFrame.height * 0.95 &&
-            relativeArea <= 0.45
-    }
-
-    private func normalizedTransientCandidates(_ candidates: [AXFrameCandidate]) -> [AXFrameCandidate] {
-        var deduplicatedCandidates: [AXFrameCandidate] = []
-
-        for candidate in candidates where isReasonableTransientCandidateFrame(candidate.frame) {
-            if let existingIndex = deduplicatedCandidates.firstIndex(where: {
-                $0.frame.nearlyEquals(candidate.frame, tolerance: 4)
-            }) {
-                if transientRolePriority(for: candidate.role) < transientRolePriority(for: deduplicatedCandidates[existingIndex].role) {
-                    deduplicatedCandidates[existingIndex] = candidate
-                }
-                continue
-            }
-
-            deduplicatedCandidates.append(candidate)
-        }
-
-        return deduplicatedCandidates.filter { candidate in
-            !deduplicatedCandidates.contains { other in
-                guard candidate.frame != other.frame else { return false }
-                return candidate.frame.contains(other.frame.insetBy(dx: -12, dy: -12)) &&
-                    candidate.frame.area > other.frame.area * 1.35
-            }
-        }
-    }
-
-    private func transientRolePriority(for role: String?) -> Int {
-        switch role {
-        case kAXMenuRole as String, "AXPopover":
-            return 0
-        case kAXSheetRole as String, "AXDialog":
-            return 1
-        case kAXWindowRole as String:
-            return 2
-        default:
-            return 3
-        }
-    }
-
-    private func refinedTransientFrame(for candidateFrame: CGRect, using snapshots: [WindowSnapshot]) -> CGRect {
-        let center = CGPoint(x: candidateFrame.midX, y: candidateFrame.midY)
-
-        let matchingSnapshots = snapshots
-            .filter { $0.layer > 0 }
-            .map(\.bounds)
-            .filter { isReasonableTransientCandidateFrame($0) }
-            .filter { !$0.intersection(candidateFrame).isNull }
-            .filter { $0.insetBy(dx: -10, dy: -10).contains(center) }
-            .filter { $0.area <= candidateFrame.area * 1.05 }
-
-        guard let bestSnapshot = matchingSnapshots.min(by: { lhs, rhs in
-            if abs(lhs.area - rhs.area) > 1 {
-                return lhs.area < rhs.area
-            }
-
-            let lhsDistance = hypot(lhs.midX - center.x, lhs.midY - center.y)
-            let rhsDistance = hypot(rhs.midX - center.x, rhs.midY - center.y)
-            return lhsDistance < rhsDistance
-        }) else {
-            return candidateFrame
-        }
-
-        return bestSnapshot
+        return cocoaBounds
     }
 
     private func bestMatchingPrimarySnapshot(
         from snapshots: [WindowSnapshot],
         near referenceFrame: CGRect
     ) -> WindowSnapshot? {
-        snapshots
-            .filter { $0.layer == 0 }
-            .max { lhs, rhs in
-                matchScore(for: lhs.bounds, referenceFrame: referenceFrame)
-                    < matchScore(for: rhs.bounds, referenceFrame: referenceFrame)
-            }
-    }
-
-    private func auxiliaryCutouts(
-        from snapshots: [WindowSnapshot],
-        excludingPrimaryFrame primaryFrame: CGRect
-    ) -> [WindowCutout] {
-        snapshots
-            .filter { $0.layer > 0 }
-            .filter { !$0.bounds.nearlyEquals(primaryFrame) }
-            .map { WindowCutout(frame: $0.bounds, cornerRadius: Self.cornerRadius(forLayer: $0.layer)) }
-    }
-
-    private func auxiliaryWindows(
-        from snapshots: [WindowSnapshot],
-        excludingPrimaryFrame primaryFrame: CGRect
-    ) -> [(windowNumber: Int, cornerRadius: CGFloat)] {
-        snapshots
-            .filter { $0.layer > 0 }
-            .filter { !$0.bounds.nearlyEquals(primaryFrame) }
-            .map { ($0.windowNumber, Self.cornerRadius(forLayer: $0.layer)) }
-    }
-
-    private static func cornerRadius(forLayer layer: Int) -> CGFloat {
-        layer == 0 ? standardCornerRadius : panelCornerRadius
+        snapshots.max { lhs, rhs in
+            matchScore(for: lhs.bounds, referenceFrame: referenceFrame)
+                < matchScore(for: rhs.bounds, referenceFrame: referenceFrame)
+        }
     }
 
     private func matchScore(for candidateFrame: CGRect, referenceFrame: CGRect) -> Double {
@@ -772,34 +437,30 @@ final class ActiveWindowTracker: NSObject {
         return overlapScore * 1_000 - centerDistance
     }
 
-    private func deduplicatedCutouts(_ cutouts: [WindowCutout]) -> [WindowCutout] {
-        var deduplicated: [WindowCutout] = []
-
-        for cutout in cutouts {
-            guard !deduplicated.contains(where: { $0.frame.nearlyEquals(cutout.frame) }) else { continue }
-            deduplicated.append(cutout)
-        }
-
-        return deduplicated
+    private func resetPrimaryState() {
+        primaryWindowNumber = nil
+        primaryWindowFrame = nil
     }
 
-    private func bestMatchingScreen(for frame: CGRect) -> NSScreen? {
-        NSScreen.screens.max { lhs, rhs in
-            let lhsArea = lhs.visibleFrame.intersection(frame).area
-            let rhsArea = rhs.visibleFrame.intersection(frame).area
-            return lhsArea < rhsArea
-        }
-    }
-
-    private func updateState(cutouts: [WindowCutout], statusMessage: String?) {
-        guard highlightedWindowCutouts != cutouts || self.statusMessage != statusMessage else { return }
-        highlightedWindowCutouts = cutouts
-        self.statusMessage = statusMessage
+    private func updateStatus(_ message: String?) {
+        statusMessage = message
         publishUpdate()
     }
 
+    private var lastPublishedPrimaryNumber: Int?
+    private var lastPublishedPrimaryFrame: CGRect?
+    private var lastPublishedStatus: String?
+
     private func publishUpdate() {
-        onUpdate?(highlightedWindowCutouts, statusMessage)
+        if lastPublishedPrimaryNumber == primaryWindowNumber,
+           lastPublishedPrimaryFrame == primaryWindowFrame,
+           lastPublishedStatus == statusMessage {
+            return
+        }
+        lastPublishedPrimaryNumber = primaryWindowNumber
+        lastPublishedPrimaryFrame = primaryWindowFrame
+        lastPublishedStatus = statusMessage
+        onUpdate?(statusMessage)
     }
 
     private func screen(for displayID: CGDirectDisplayID) -> NSScreen? {
@@ -820,7 +481,7 @@ final class ActiveWindowTracker: NSObject {
     }
 }
 
-private let activeWindowObserverCallback: AXObserverCallback = { _, _, _, refcon in
+private let axFocusChangeCallback: AXObserverCallback = { _, _, _, refcon in
     guard let refcon else { return }
     let tracker = Unmanaged<ActiveWindowTracker>.fromOpaque(refcon).takeUnretainedValue()
 
@@ -833,33 +494,6 @@ private struct WindowSnapshot {
     let windowNumber: Int
     let ownerPID: pid_t
     let bounds: CGRect
-    let layer: Int
-}
-
-private struct AXFrameCandidate {
-    let frame: CGRect
-    let role: String?
-}
-
-private extension Array where Element == CGRect {
-    func removingContainerFrames() -> [CGRect] {
-        filter { candidate in
-            !contains { other in
-                guard candidate != other,
-                      candidate.area > other.area * 1.01 else {
-                    return false
-                }
-                let expandedCandidate = candidate.insetBy(dx: -4, dy: -4)
-                return expandedCandidate.contains(other)
-            }
-        }
-    }
-}
-
-private extension Array {
-    func ifEmpty(_ fallback: @autoclosure () -> [Element]) -> [Element] {
-        isEmpty ? fallback() : self
-    }
 }
 
 private extension CGRect {

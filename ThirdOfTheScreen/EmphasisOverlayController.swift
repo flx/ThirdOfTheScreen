@@ -4,7 +4,7 @@ import OSLog
 private let emphasisLog = Logger(subsystem: "com.felix.thirdofthescreen", category: "Emphasis")
 
 @MainActor
-final class EmphasisStripsController {
+final class EmphasisOverlayController {
     private static let motionMargin: CGFloat = 500
     private static let maxPanelDimension: CGFloat = 7500
     private static let cornerRadius: CGFloat = {
@@ -31,29 +31,7 @@ final class EmphasisStripsController {
 
     func setActiveWindow(windowID: PrivateWindowServer.WindowID, cocoaBounds: CGRect) {
         let panel = ensurePanel()
-
-        let screenFrame = (NSScreen.screens.first(where: { $0.frame.intersects(cocoaBounds) })
-                           ?? NSScreen.main)?.frame
-            ?? CGRect(x: 0, y: 0, width: 3840, height: 2160)
-
-        let margin = Self.motionMargin
-        let maxD = Self.maxPanelDimension
-
-        let panelFrame = CGRect(
-            x: screenFrame.minX - margin,
-            y: screenFrame.minY - margin,
-            width: min(screenFrame.width + 2 * margin, maxD),
-            height: min(screenFrame.height + 2 * margin, maxD)
-        )
-
-        // Cutout expressed in the panel's flipped (top-left origin) local
-        // coordinate space.
-        let cutout = CGRect(
-            x: cocoaBounds.minX - panelFrame.minX,
-            y: panelFrame.maxY - cocoaBounds.maxY,
-            width: cocoaBounds.width,
-            height: cocoaBounds.height
-        )
+        let (panelFrame, cutout) = panelGeometry(for: cocoaBounds)
 
         panel.setFrame(panelFrame, display: false)
         panel.applyCutout(
@@ -66,30 +44,60 @@ final class EmphasisStripsController {
             panel.orderFrontRegardless()
         }
 
+        let childID = CGWindowID(panel.windowNumber)
         if parentedWindowID != windowID {
-            let childID = CGWindowID(panel.windowNumber)
-            let okParent = PrivateWindowServer.setWindowParent(child: childID, parent: windowID)
-            let okOrder = PrivateWindowServer.orderWindow(window: childID, order: .above, relativeTo: windowID)
-            emphasisLog.notice("reparent child=\(panel.windowNumber) parent=\(windowID) parentOK=\(okParent) orderOK=\(okOrder) (was parent=\(self.parentedWindowID ?? 0))")
+            let parentOK = PrivateWindowServer.setWindowParent(child: childID, parent: windowID)
+            let orderOK = PrivateWindowServer.orderWindow(window: childID, order: .above, relativeTo: windowID)
+            emphasisLog.notice("reparent child=\(panel.windowNumber) parent=\(windowID) parentOK=\(parentOK) orderOK=\(orderOK) (was parent=\(self.parentedWindowID ?? 0))")
             parentedWindowID = windowID
         } else {
             // Even when parent hasn't changed, keep our z-order pinned above it — the
             // parent may have been raised by a user click which could have pushed us
             // below sibling windows.
-            PrivateWindowServer.orderWindow(
-                window: CGWindowID(panel.windowNumber),
-                order: .above,
-                relativeTo: windowID
-            )
+            let orderOK = PrivateWindowServer.orderWindow(window: childID, order: .above, relativeTo: windowID)
+            if !orderOK {
+                emphasisLog.notice("orderWindow pin-above failed for child=\(panel.windowNumber) parent=\(windowID)")
+            }
         }
     }
 
     func clear() {
         guard let panel else { return }
-        emphasisLog.notice("clear() called, tearing down parenting (was parent=\(self.parentedWindowID ?? 0))")
-        PrivateWindowServer.clearWindowParent(child: CGWindowID(panel.windowNumber))
+        emphasisLog.notice("clear() tearing down parenting (was parent=\(self.parentedWindowID ?? 0))")
+        let ok = PrivateWindowServer.clearWindowParent(child: CGWindowID(panel.windowNumber))
+        if !ok {
+            emphasisLog.notice("clearWindowParent failed for child=\(panel.windowNumber)")
+        }
         panel.orderOut(nil)
         parentedWindowID = nil
+    }
+
+    private func panelGeometry(for cocoaBounds: CGRect) -> (panelFrame: CGRect, cutout: CGRect) {
+        let screenFrame = (NSScreen.screens.first(where: { $0.frame.intersects(cocoaBounds) }) ?? NSScreen.main)?.frame
+        if screenFrame == nil {
+            emphasisLog.notice("no screen intersects active window bounds \(String(describing: cocoaBounds), privacy: .public); falling back to default screen size")
+        }
+        let referenceFrame = screenFrame ?? CGRect(x: 0, y: 0, width: 3840, height: 2160)
+
+        let margin = Self.motionMargin
+        let maxD = Self.maxPanelDimension
+
+        let panelFrame = CGRect(
+            x: referenceFrame.minX - margin,
+            y: referenceFrame.minY - margin,
+            width: min(referenceFrame.width + 2 * margin, maxD),
+            height: min(referenceFrame.height + 2 * margin, maxD)
+        )
+
+        // Cutout in the panel's flipped (top-left origin) local coordinate space.
+        let cutout = CGRect(
+            x: cocoaBounds.minX - panelFrame.minX,
+            y: panelFrame.maxY - cocoaBounds.maxY,
+            width: cocoaBounds.width,
+            height: cocoaBounds.height
+        )
+
+        return (panelFrame, cutout)
     }
 
     private func ensurePanel() -> EmphasisPanel {
@@ -117,10 +125,9 @@ private final class EmphasisPanel: NSWindow {
         ignoresMouseEvents = true
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         hidesOnDeactivate = false
-        // .floating sits above every .normal window (other apps' windows, the
-        // active window itself). The cutout in our mask lets the active window
-        // show through, and ignoresMouseEvents=true lets clicks pass through
-        // the rest. Parenting still handles motion tracking during drags.
+        // .floating sits above every .normal window. The cutout in our mask lets the
+        // active window show through, and ignoresMouseEvents=true lets clicks pass
+        // through the rest. Parenting still handles motion tracking during drags.
         level = .floating
         isReleasedWhenClosed = false
         contentView = emphasisView
@@ -129,8 +136,8 @@ private final class EmphasisPanel: NSWindow {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
-        // Bypass AppKit's keep-on-screen clamp so large screen-plus-margin
-        // rects aren't silently snapped down.
+        // Bypass AppKit's keep-on-screen clamp so large screen-plus-margin rects
+        // aren't silently snapped down.
         return frameRect
     }
 
