@@ -11,6 +11,7 @@ final class ActiveWindowTracker: NSObject {
     private static let accessibilityAccessMessage =
         "Allow Accessibility access in System Settings > Privacy & Security > Accessibility. If it is already enabled, remove and re-add Third Of The Screen."
     private static let slowPathRefreshInterval = 1.0 / 10.0
+    private static let missedBoundsGrace: CFTimeInterval = 0.06
 
     var onUpdate: ((String?) -> Void)?
     var excludedWindowNumbersProvider: (() -> Set<Int>)?
@@ -20,6 +21,7 @@ final class ActiveWindowTracker: NSObject {
     private(set) var primaryWindowFrame: CGRect?
 
     private var workspaceObservers: [NSObjectProtocol] = []
+    private var boundsMiss: (windowNumber: Int, since: CFTimeInterval)?
     private var fastPathDisplayLink: CADisplayLink?
     private var slowPathTimer: Timer?
     private var observedProcessID: pid_t?
@@ -151,23 +153,55 @@ final class ActiveWindowTracker: NSObject {
     }
 
     private func slowPathTick() {
+        // The display link can be missing for the whole session (no screen at
+        // start, e.g. launch-at-login before displays enumerate) — retry, and
+        // never let the window-gone check depend on the link existing.
+        if fastPathDisplayLink == nil {
+            startFastPathDisplayLink()
+        }
+
         // Backstop for missed AX focus notifications (common when an app has
         // just launched and the observer attached before the focused window
         // existed). Retry the focus query so we self-heal within ~100 ms.
         if primaryWindowFrame == nil, observedApplicationElement != nil {
             refreshFocusContext()
         } else {
+            verifyPrimaryWindowPresence()
             matchPrimaryWindowNumber()
             publishUpdate()
         }
     }
 
     private func fastPathTick() {
-        guard let windowNumber = primaryWindowNumber,
-              let observedBounds = fetchWindowBounds(windowNumber: windowNumber) else {
+        verifyPrimaryWindowPresence()
+    }
+
+    // A window absent from the on-screen list is closed, minimized, hidden or
+    // on another Space — in every one of those the emphasis must come down.
+    // The grace period is time-based (not frame-counted: refresh rates differ
+    // per display) and keyed to the window number so a newly adopted window
+    // gets a fresh budget.
+    private func verifyPrimaryWindowPresence() {
+        guard let windowNumber = primaryWindowNumber else { return }
+
+        guard let observedBounds = fetchWindowBounds(windowNumber: windowNumber) else {
+            let now = CACurrentMediaTime()
+            guard let miss = boundsMiss, miss.windowNumber == windowNumber else {
+                boundsMiss = (windowNumber, now)
+                return
+            }
+            if now - miss.since >= Self.missedBoundsGrace {
+                trackerLog.notice("window \(windowNumber) no longer resolves; treating as gone")
+                resetPrimaryState()
+                // Re-resolve before anything is published: if focus already
+                // moved to another window this publishes that window, not an
+                // intermediate nil.
+                refreshFocusContext()
+            }
             return
         }
 
+        boundsMiss = nil
         guard primaryWindowFrame != observedBounds else { return }
         primaryWindowFrame = observedBounds
         publishUpdate()
@@ -181,7 +215,16 @@ final class ActiveWindowTracker: NSObject {
             return nil
         }
 
-        return cocoaBounds(fromWindowInfo: info)
+        // No minimum-size floor here: this call doubles as the liveness probe
+        // for the tracked window, and a live window dragged very small must
+        // not read as closed. The floor stays in windowSnapshots(), where it
+        // filters matcher candidates.
+        guard let boundsDictionary = info[kCGWindowBounds as String] as? NSDictionary,
+              let windowServerBounds = CGRect(dictionaryRepresentation: boundsDictionary) else {
+            return nil
+        }
+
+        return convertFromWindowServerCoordinates(windowServerBounds)
     }
 
     private func attachToFrontmostApplication() {
@@ -212,18 +255,28 @@ final class ActiveWindowTracker: NSObject {
         addApplicationNotification(kAXFocusedWindowChangedNotification as CFString)
         addApplicationNotification(kAXMainWindowChangedNotification as CFString)
         addApplicationNotification(kAXApplicationActivatedNotification as CFString)
+        addApplicationNotification(kAXApplicationHiddenNotification as CFString)
     }
+
+    private static let windowElementNotifications: [CFString] = [
+        kAXWindowMovedNotification as CFString,
+        kAXWindowResizedNotification as CFString,
+        kAXUIElementDestroyedNotification as CFString,
+        kAXWindowMiniaturizedNotification as CFString,
+    ]
 
     private func tearDownAccessibilityObservation() {
         if let observer, let windowElement = observedWindowElement {
-            AXObserverRemoveNotification(observer, windowElement, kAXWindowMovedNotification as CFString)
-            AXObserverRemoveNotification(observer, windowElement, kAXWindowResizedNotification as CFString)
+            for notification in Self.windowElementNotifications {
+                AXObserverRemoveNotification(observer, windowElement, notification)
+            }
         }
 
         if let observer, let applicationElement = observedApplicationElement {
             AXObserverRemoveNotification(observer, applicationElement, kAXFocusedWindowChangedNotification as CFString)
             AXObserverRemoveNotification(observer, applicationElement, kAXMainWindowChangedNotification as CFString)
             AXObserverRemoveNotification(observer, applicationElement, kAXApplicationActivatedNotification as CFString)
+            AXObserverRemoveNotification(observer, applicationElement, kAXApplicationHiddenNotification as CFString)
             CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
         }
 
@@ -257,26 +310,23 @@ final class ActiveWindowTracker: NSObject {
         }
 
         if let observedWindowElement {
-            AXObserverRemoveNotification(observer, observedWindowElement, kAXWindowMovedNotification as CFString)
-            AXObserverRemoveNotification(observer, observedWindowElement, kAXWindowResizedNotification as CFString)
+            for notification in Self.windowElementNotifications {
+                AXObserverRemoveNotification(observer, observedWindowElement, notification)
+            }
         }
 
         observedWindowElement = windowElement
 
-        let movedResult = AXObserverAddNotification(
-            observer,
-            windowElement,
-            kAXWindowMovedNotification as CFString,
-            Unmanaged.passUnretained(self).toOpaque()
-        )
-        let resizedResult = AXObserverAddNotification(
-            observer,
-            windowElement,
-            kAXWindowResizedNotification as CFString,
-            Unmanaged.passUnretained(self).toOpaque()
-        )
-        if movedResult != .success || resizedResult != .success {
-            trackerLog.notice("AXObserverAddNotification window moved/resized failed (moved=\(String(describing: movedResult), privacy: .public), resized=\(String(describing: resizedResult), privacy: .public))")
+        for notification in Self.windowElementNotifications {
+            let result = AXObserverAddNotification(
+                observer,
+                windowElement,
+                notification,
+                Unmanaged.passUnretained(self).toOpaque()
+            )
+            if result != .success {
+                trackerLog.notice("AXObserverAddNotification \(notification as String, privacy: .public) failed: \(String(describing: result), privacy: .public)")
+            }
         }
     }
 
@@ -440,6 +490,7 @@ final class ActiveWindowTracker: NSObject {
     private func resetPrimaryState() {
         primaryWindowNumber = nil
         primaryWindowFrame = nil
+        boundsMiss = nil
     }
 
     private func updateStatus(_ message: String?) {

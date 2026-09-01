@@ -13,25 +13,6 @@ of that date.
 
 ## 0. Next up — work these first, in this order
 
-- [ ] (emphasis-punchout-outlives-closed-window) **[standard · High]** The
-  reported bug: close a window (e.g. a small Finder window) and the bright
-  punch-out stays until a new window is selected. Mechanism CONFIRMED, three
-  cooperating holes (arch review F1): no
-  `kAXUIElementDestroyedNotification` on the observed window
-  (`ActiveWindowTracker.swift:266-277`); `fastPathTick` silently returns when
-  the dead window's bounds fetch comes back nil (`:165-174`), so stale state is
-  held forever; and `OverlayManager.pushActiveWindowToEmphasis` deliberately
-  "keep[s] current parenting" when the tracker has no primary
-  (`OverlayManager.swift:224-228`), so even a *successful* AX reset leaves the
-  panel up. Fix: register the destroyed notification in
-  `updateWindowObservationIfNeeded` (clear + `refreshFocusContext()` on fire);
-  treat 2–3 consecutive nil fetches in `fastPathTick` as window-gone; give the
-  keep-parenting branch a ~200 ms deadline so menu/sheet transients still don't
-  flicker. Cover miniaturize + app-hide too
-  (`kAXWindowMiniaturizedNotification`, `kAXApplicationHiddenNotification`) —
-  the nil-fetch heuristic does NOT catch those (a minimized window still
-  resolves via `.optionIncludingWindow`).
-
 - [ ] (cross-app-activation-latency) **[standard · High]** Cross-app focus
   switches wait on `NSWorkspace.didActivateApplicationNotification`
   (`ActiveWindowTracker.swift:80-91`), which lands well after the visual

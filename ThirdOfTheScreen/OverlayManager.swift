@@ -88,6 +88,7 @@ final class OverlayManager: ObservableObject {
     private var workspaceObservers: [NSObjectProtocol] = []
     private var hasRestoredState = false
     private var lastEmphasisWindowNumber: Int?
+    private var pendingEmphasisClear: Task<Void, Never>?
 
     private enum DefaultsKey {
         static let emphasizeActiveWindowEnabled = "emphasizeActiveWindowEnabled"
@@ -217,15 +218,19 @@ final class OverlayManager: ObservableObject {
 
     private func pushActiveWindowToEmphasis() {
         guard isActiveWindowEmphasisEnabled else {
+            cancelPendingEmphasisClear()
             emphasisOverlay.clear()
             return
         }
 
         guard let windowNumber = activeWindowTracker.primaryWindowNumber,
               let bounds = activeWindowTracker.primaryWindowFrame else {
-            overlayLog.notice("pushActiveWindowToEmphasis: no primary (windowNumber=\(self.activeWindowTracker.primaryWindowNumber ?? -1), frame-present=\(self.activeWindowTracker.primaryWindowFrame != nil)) — keeping current parenting")
+            overlayLog.notice("pushActiveWindowToEmphasis: no primary (windowNumber=\(self.activeWindowTracker.primaryWindowNumber ?? -1), frame-present=\(self.activeWindowTracker.primaryWindowFrame != nil)) — holding current parenting briefly")
+            scheduleEmphasisClearAfterHold()
             return
         }
+
+        cancelPendingEmphasisClear()
 
         if lastEmphasisWindowNumber != windowNumber {
             overlayLog.notice("pushActiveWindowToEmphasis: primary window changed \(self.lastEmphasisWindowNumber ?? -1) -> \(windowNumber)")
@@ -233,5 +238,31 @@ final class OverlayManager: ObservableObject {
         }
 
         emphasisOverlay.setActiveWindow(windowID: CGWindowID(windowNumber), cocoaBounds: bounds)
+    }
+
+    // A nil primary is usually a transient (a menu, sheet or popover holds
+    // focus) and clearing immediately would flicker the overlay. But it is
+    // also what a closed window leaves behind, so hold only briefly: if no
+    // primary re-appears within the deadline, take the emphasis down.
+    // 180 ms so that grace-period + hold stays under a quarter second on any
+    // display; long enough that menu/sheet focus transients don't flicker.
+    private static let emphasisClearHold = Duration.milliseconds(180)
+
+    private func scheduleEmphasisClearAfterHold() {
+        guard pendingEmphasisClear == nil else { return }
+        pendingEmphasisClear = Task { [weak self] in
+            try? await Task.sleep(for: Self.emphasisClearHold)
+            guard let self, !Task.isCancelled else { return }
+            self.pendingEmphasisClear = nil
+            if self.activeWindowTracker.primaryWindowNumber == nil {
+                overlayLog.notice("no primary window after hold deadline — clearing emphasis")
+                self.emphasisOverlay.clear()
+            }
+        }
+    }
+
+    private func cancelPendingEmphasisClear() {
+        pendingEmphasisClear?.cancel()
+        pendingEmphasisClear = nil
     }
 }
