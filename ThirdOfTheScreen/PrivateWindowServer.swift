@@ -1,3 +1,4 @@
+import ApplicationServices
 import Darwin
 import CoreGraphics
 
@@ -12,6 +13,7 @@ enum PrivateWindowServer {
     private typealias MainConnectionIDFn = @convention(c) () -> ConnectionID
     private typealias SetWindowParentFn = @convention(c) (ConnectionID, WindowID, WindowID) -> Int32
     private typealias OrderWindowFn = @convention(c) (ConnectionID, WindowID, Int32, WindowID) -> Int32
+    private typealias AXUIElementGetWindowFn = @convention(c) (AXUIElement, UnsafeMutablePointer<CGWindowID>) -> AXError
 
     enum WindowOrder: Int32 {
         case below = -1
@@ -29,6 +31,10 @@ enum PrivateWindowServer {
 
     private static let orderWindowFn: OrderWindowFn? = {
         resolve("SLSOrderWindow") ?? resolve("CGSOrderWindow")
+    }()
+
+    private static let axUIElementGetWindowFn: AXUIElementGetWindowFn? = {
+        resolve("_AXUIElementGetWindow")
     }()
 
     static var isAvailable: Bool {
@@ -52,6 +58,16 @@ enum PrivateWindowServer {
     static func clearWindowParent(child: WindowID) -> Bool {
         // Passing parent=0 detaches the child from any parent.
         setWindowParent(child: child, parent: 0)
+    }
+
+    /// The window ID behind an Accessibility window element, via the private
+    /// HIServices symbol `_AXUIElementGetWindow`. nil when the symbol is gone
+    /// (fall back to geometry matching) or the element no longer has a window.
+    static func windowID(forAXElement element: AXUIElement) -> WindowID? {
+        guard let call = axUIElementGetWindowFn else { return nil }
+        var windowID: CGWindowID = 0
+        guard call(element, &windowID) == .success, windowID != 0 else { return nil }
+        return windowID
     }
 
     @discardableResult
